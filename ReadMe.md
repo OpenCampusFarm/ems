@@ -23,7 +23,7 @@ ems/
 ### 1. Clone the repo
 
 ```bash
-git clone <repo-url> /home/pi/ems
+git clone https://github.com/OpenCampusFarm/ems /home/pi/ems
 ```
 
 ### 2. Install systemd service
@@ -36,10 +36,10 @@ sudo systemctl enable --now ems
 
 This starts supervisord which manages three processes:
 
-| Program   | Description                                       |
-|-----------|---------------------------------------------------|
-| `core`    | Runs `core/main.py` via `uv`                      |
-| `fan`     | Runs `fan/main.py` via `uv`                       |
+| Program   | Description                                          |
+| --------- | ---------------------------------------------------- |
+| `core`    | Runs `core/main.py` via `uv`                         |
+| `fan`     | Runs `fan/main.py` via `uv`                          |
 | `updater` | Polls GitHub every 5 min and restarts on new commits |
 
 ## Auto-update
