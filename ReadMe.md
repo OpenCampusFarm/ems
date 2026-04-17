@@ -44,7 +44,7 @@ This starts supervisord which manages three processes:
 
 ## Auto-update
 
-`update.sh` runs in a loop, pulling from GitHub and calling `supervisorctl reload` only when new commits are detected. The poll interval defaults to 60 seconds and can be overridden via the `UPDATE_INTERVAL` environment variable in `supervisord.conf`.
+`update.sh` runs in a loop, pulling from GitHub and calling `supervisord ctl reload` only when new commits are detected. The poll interval defaults to 60 seconds and can be overridden via the `UPDATE_INTERVAL` environment variable in `supervisord.conf`.
 
 ## Useful Commands
 
@@ -58,5 +58,5 @@ tail -f /tmp/ems_fan.log
 tail -f /tmp/ems_updater.log
 
 # Manually reload all programs
-supervisorctl reload
+supervisord ctl reload
 ```

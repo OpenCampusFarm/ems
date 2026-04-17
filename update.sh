@@ -18,7 +18,7 @@ while true; do
 
     if [ "$BEFORE" != "$AFTER" ]; then
         echo "New changes detected, restarting supervisord..."
-        supervisorctl reload
+        supervisord ctl reload
     else
         echo "No changes, supervisord not restarted."
     fi
