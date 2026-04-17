@@ -28,8 +28,8 @@ Every `POLL_INTERVAL` seconds (default 300s):
 
 | Condition | CoolBot setpoint | EV charging          |
 | --------- | ---------------- | -------------------- |
-| Clean     | 40°F             | ON (if SOC < target) |
-| Dirty     | 48°F             | OFF                  |
+| Clean     | 45°F             | ON (if SOC < target) |
+| Dirty     | 50°F             | OFF                  |
 
 ## Setup
 
