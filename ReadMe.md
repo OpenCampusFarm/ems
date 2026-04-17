@@ -16,7 +16,7 @@ ems/
 ## Prerequisites
 
 - [uv](https://github.com/astral-sh/uv) — Python package manager
-- [supervisord](https://github.com/ochinchina/supervisord) — process manager (ochinchina's Go port)
+- [supervisord](https://github.com/ochinchina/supervisord) — process manager (ochinchina's Go port, single `supervisord` binary)
 
 ## Setup
 
@@ -36,15 +36,21 @@ sudo systemctl enable --now ems
 
 This starts supervisord which manages three processes:
 
-| Program   | Description                                      |
-|-----------|--------------------------------------------------|
-| `core`    | Runs `core/main.py` via `uv`                     |
-| `fan`     | Runs `fan/main.py` via `uv`                      |
-| `updater` | Polls GitHub every 60s and reloads on new commits |
+| Program   | Description                                       |
+|-----------|---------------------------------------------------|
+| `core`    | Runs `core/main.py` via `uv`                      |
+| `fan`     | Runs `fan/main.py` via `uv`                       |
+| `updater` | Polls GitHub every 5 min and restarts on new commits |
 
 ## Auto-update
 
-`update.sh` runs in a loop, pulling from GitHub and calling `supervisord ctl reload` only when new commits are detected. The poll interval defaults to 60 seconds and can be overridden via the `UPDATE_INTERVAL` environment variable in `supervisord.conf`.
+`update.sh` runs in a loop, pulling from GitHub every 5 minutes. If new commits are detected it runs `sudo systemctl restart ems` to restart the whole stack. No change means no restart.
+
+To allow the `pi` user to restart the service without a password prompt, add to `/etc/sudoers`:
+
+```
+pi ALL=(ALL) NOPASSWD: /bin/systemctl restart ems
+```
 
 ## Useful Commands
 
@@ -52,11 +58,15 @@ This starts supervisord which manages three processes:
 # Check service status
 sudo systemctl status ems
 
+# Restart everything
+sudo systemctl restart ems
+
+# Stop / start
+sudo systemctl stop ems
+sudo systemctl start ems
+
 # View logs
 tail -f /tmp/ems_core.log
 tail -f /tmp/ems_fan.log
 tail -f /tmp/ems_updater.log
-
-# Manually reload all programs
-supervisord ctl reload
 ```
