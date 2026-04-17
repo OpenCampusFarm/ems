@@ -319,6 +319,7 @@ async def control_loop():
 
 
 def main():
+    log.info("[Fan] Starting up...")
     setup_gpio()
     try:
         asyncio.run(control_loop())

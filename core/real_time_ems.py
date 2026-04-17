@@ -228,6 +228,7 @@ def run_ems_cycle() -> None:
 
 
 def main() -> None:
+    log.info("[EMS] Starting up...")
     log.info("Campus Farm EMS starting — poll every %ds", POLL_INTERVAL)
     while True:
         try:
