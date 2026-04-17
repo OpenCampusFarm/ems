@@ -53,9 +53,9 @@ This starts supervisord which manages three processes:
 sudo systemctl status ems
 
 # View logs
-tail -f /tmp/core.log
-tail -f /tmp/fan.log
-tail -f /tmp/updater.log
+tail -f /tmp/ems_core.log
+tail -f /tmp/ems_fan.log
+tail -f /tmp/ems_updater.log
 
 # Manually reload all programs
 supervisorctl reload
