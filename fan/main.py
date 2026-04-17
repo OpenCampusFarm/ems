@@ -289,33 +289,27 @@ def set_fan(on: bool):
 
 # --- Main control loop ---
 
-TEST_FAN_ON = True  # force fan ON for testing — set to False for normal operation
-
 async def control_loop():
     while True:
         try:
-            if TEST_FAN_ON:
-                log.info("[Fan] TEST MODE — fan forced ON")
-                set_fan(True)
-            else:
-                async with CoolBotClient() as cb:
-                    if not cb.is_running:
-                        log.warning("[CoolBot] Offline or off — fan OFF")
-                        set_fan(False)
-                    else:
-                        outdoor = read_outdoor_temp()
-                        room = cb.room_temp
-                        setpoint = cb.set_temp_f
+            async with CoolBotClient() as cb:
+                if not cb.is_running:
+                    log.warning("[CoolBot] Offline or off — fan OFF")
+                    set_fan(False)
+                else:
+                    outdoor = read_outdoor_temp()
+                    room = cb.room_temp
+                    setpoint = cb.set_temp_f
 
-                        if None in (outdoor, room, setpoint):
-                            log.warning("[Fan] Missing data (outdoor=%s, room=%s, setpoint=%s) — fan OFF", outdoor, room, setpoint)
-                            set_fan(False)
-                        elif outdoor < setpoint < room:
-                            log.info("[Fan] outdoor=%.1f°F < setpoint=%.1f°F < room=%.1f°F — fan ON", outdoor, setpoint, room)
-                            set_fan(True)
-                        else:
-                            log.info("[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F — fan OFF", outdoor, setpoint, room)
-                            set_fan(False)
+                    if None in (outdoor, room, setpoint):
+                        log.warning("[Fan] Missing data (outdoor=%s, room=%s, setpoint=%s) — fan OFF", outdoor, room, setpoint)
+                        set_fan(False)
+                    elif outdoor < setpoint < room:
+                        log.info("[Fan] outdoor=%.1f°F < setpoint=%.1f°F < room=%.1f°F — fan ON", outdoor, setpoint, room)
+                        set_fan(True)
+                    else:
+                        log.info("[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F — fan OFF", outdoor, setpoint, room)
+                        set_fan(False)
 
         except Exception as e:
             log.error("[Fan] Control loop error: %s — fan OFF", e, exc_info=True)
