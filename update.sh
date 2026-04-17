@@ -18,7 +18,7 @@ while true; do
 
     if [ "$BEFORE" != "$AFTER" ]; then
         echo "New changes detected, restarting supervisord..."
-        supervisord ctl reload
+        sudo systemctl restart ems
     else
         echo "No changes, supervisord not restarted."
     fi
