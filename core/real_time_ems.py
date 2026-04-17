@@ -46,9 +46,9 @@ _wt_token_ts: float = 0.0
 _WT_TOKEN_TTL = 25 * 60
 
 # ── CoolBot setpoints ─────────────────────────────────────────────────────────
-SETPOINT_COOLTH = 39  # °F — low setpoint (clean energy)
+SETPOINT_COOLTH = 40  # °F — low setpoint (clean energy)
 SETPOINT_ECON = 48  # °F — high setpoint (dirty energy)
-SETPOINT_DEFAULT = 41  # °F — neutral fallback
+SETPOINT_DEFAULT = 44  # °F — neutral fallback
 
 # ── EV ────────────────────────────────────────────────────────────────────────
 EV_SOC_TARGET = 85  # %
