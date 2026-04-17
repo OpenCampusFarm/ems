@@ -7,7 +7,13 @@ while true; do
     cd "$REPO_DIR"
 
     BEFORE=$(git rev-parse HEAD)
-    git pull
+
+    if ! git pull; then
+        echo "WARNING: git pull failed (network issue or GitHub downtime), skipping this cycle."
+        sleep "$INTERVAL"
+        continue
+    fi
+
     AFTER=$(git rev-parse HEAD)
 
     if [ "$BEFORE" != "$AFTER" ]; then

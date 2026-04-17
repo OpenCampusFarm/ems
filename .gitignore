@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+pi_project_extracted/
+.ruff_cache
