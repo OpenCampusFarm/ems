@@ -40,11 +40,11 @@ This starts supervisord which manages three processes:
 | --------- | ---------------------------------------------------- |
 | `core`    | Runs `core/main.py` via `uv`                         |
 | `fan`     | Runs `fan/main.py` via `uv`                          |
-| `updater` | Polls GitHub every 5 min and restarts on new commits |
+| `updater` | Polls GitHub every 2 min and restarts on new commits |
 
 ## Auto-update
 
-`update.sh` runs in a loop, pulling from GitHub every 5 minutes. If new commits are detected it runs `sudo systemctl restart ems` to restart the whole stack. No change means no restart.
+`update.sh` runs in a loop, pulling from GitHub every 2 minutes. If new commits are detected it runs `sudo systemctl restart ems` to restart the whole stack. No change means no restart.
 
 To allow the `pi` user to restart the service without a password prompt, add to `/etc/sudoers`:
 
