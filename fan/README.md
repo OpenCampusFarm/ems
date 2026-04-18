@@ -18,6 +18,14 @@ Every 30 seconds:
    - `outdoor < setpoint < room` → fan **ON** (outside is cooler than setpoint; free cooling)
    - anything else → fan **OFF**
 
+## Raspberry Pi Access
+
+```bash
+ssh pi@raspberrypi.local
+```
+
+Default password: `raspberry`
+
 ## Setup
 
 Copy `.env.example` to `.env` and fill in credentials:
@@ -37,4 +45,10 @@ SIT_PASSWORD=yourpassword
 uv run python main.py
 ```
 
-Managed by supervisord as part of the `ems` project — see the root `supervisord.conf`.
+Managed by supervisord (Go implementation) as part of the `ems` project — see the root `supervisord.conf` and `ems.service`.
+
+The service runs supervisord as root so the fan program can access GPIO. Core and updater programs run as `pi`.
+
+## Testing
+
+To force the fan on regardless of conditions, set `TEST_FAN_ON = True` in `main.py`. Remember to set it back to `False` for normal operation.
