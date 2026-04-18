@@ -14,6 +14,7 @@ try:
     import RPi.GPIO as GPIO
 except ImportError:
     from unittest.mock import MagicMock
+
     GPIO = MagicMock()
     GPIO.BCM = "BCM"
     GPIO.OUT = "OUT"
@@ -80,6 +81,7 @@ PIN_POWER_ON = 9
 
 # --- CoolBot helpers ---
 
+
 def hash_password(password: str, email: str) -> str:
     email_hash = hashlib.sha256(email.lower().encode()).digest()
     return base64.b64encode(
@@ -88,17 +90,23 @@ def hash_password(password: str, email: str) -> str:
 
 
 def build_login_packet(email: str, msg_id: int = 1) -> bytes:
-    body = "\0".join([email, hash_password(PASSWORD, email), "Other", "12220000", "Blynk"])
+    body = "\0".join(
+        [email, hash_password(PASSWORD, email), "Other", "12220000", "Blynk"]
+    )
     body_bytes = body.encode()
     return struct.pack(">BHH", CMD_LOGIN, msg_id, len(body_bytes)) + body_bytes
 
 
-def build_hardware_read_packet(dashboard_id: int, device_id: int, pin: int, msg_id: int = 3) -> bytes:
+def build_hardware_read_packet(
+    dashboard_id: int, device_id: int, pin: int, msg_id: int = 3
+) -> bytes:
     body = f"{dashboard_id}-{device_id}\x00vr\x00{pin}".encode()
     return struct.pack(">BHH", CMD_HARDWARE, msg_id, len(body)) + body
 
 
-def build_hardware_packet(dashboard_id: int, device_id: int, pin: int, value, msg_id: int = 3) -> bytes:
+def build_hardware_packet(
+    dashboard_id: int, device_id: int, pin: int, value, msg_id: int = 3
+) -> bytes:
     body = f"{dashboard_id}-{device_id}\x00vw\x00{pin}\x00{value}".encode()
     return struct.pack(">BHH", CMD_HARDWARE, msg_id, len(body)) + body
 
@@ -117,20 +125,24 @@ def parse_packet(data: bytes) -> dict:
         return {"error": f"Packet too short ({len(data)} bytes)"}
 
     cmd, msg_id, field = struct.unpack(">BHH", data[:5])
-    result = {"command": cmd, "command_name": CMD_NAMES.get(cmd, f"UNKNOWN(0x{cmd:02X})"), "msg_id": msg_id}
+    result = {
+        "command": cmd,
+        "command_name": CMD_NAMES.get(cmd, f"UNKNOWN(0x{cmd:02X})"),
+        "msg_id": msg_id,
+    }
 
     if cmd == CMD_RESPONSE:
         result["status"] = field
         result["status_text"] = STATUS_CODES.get(field, f"Unknown ({field})")
         result["success"] = field == 200
     elif cmd == CMD_LOAD_PROFILE_GZIPPED:
-        body_bytes = data[5: 5 + field]
+        body_bytes = data[5 : 5 + field]
         try:
             result["profile"] = json.loads(zlib.decompress(body_bytes))
         except Exception as e:
             result["decompress_error"] = str(e)
     else:
-        body_bytes = data[5: 5 + field]
+        body_bytes = data[5 : 5 + field]
         parts = body_bytes.decode("utf-8", errors="replace").split("\0")
         result["body"] = parts
         if cmd in (CMD_HARDWARE, CMD_APP_SYNC) and len(parts) >= 3:
@@ -199,12 +211,16 @@ class CoolBotClient:
                 if raw_power is not None:
                     try:
                         self.power_on = bool(int(raw_power))
-                    except (ValueError, TypeError):
+                    except ValueError, TypeError:
                         pass
                 break
 
-        await self._ws.send(build_text_packet(CMD_ACTIVATE_DASHBOARD, str(self._dashboard_id), msg_id=3))
-        await self._ws.send(build_text_packet(CMD_APP_SYNC, str(self._dashboard_id), msg_id=4))
+        await self._ws.send(
+            build_text_packet(CMD_ACTIVATE_DASHBOARD, str(self._dashboard_id), msg_id=3)
+        )
+        await self._ws.send(
+            build_text_packet(CMD_APP_SYNC, str(self._dashboard_id), msg_id=4)
+        )
 
         self._listen_task = asyncio.create_task(self._listen())
         await asyncio.wait_for(self._ready.wait(), timeout=10)
@@ -220,7 +236,7 @@ class CoolBotClient:
             self._listen_task.cancel()
             try:
                 await self._listen_task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError, Exception:
                 pass
 
     async def _listen(self):
@@ -247,9 +263,11 @@ class CoolBotClient:
                         elif pin == str(PIN_POWER_ON):
                             self.power_on = bool(int(values[0]))
 
-            if (not self._ready.is_set()
-                    and self.room_temp is not None
-                    and self.set_temp_f is not None):
+            if (
+                not self._ready.is_set()
+                and self.room_temp is not None
+                and self.set_temp_f is not None
+            ):
                 self._ready.set()
 
 
@@ -257,6 +275,7 @@ class CoolBotClient:
 
 FARM_LAT = 42.2942
 FARM_LON = -83.7104
+
 
 def read_outdoor_temp() -> float | None:
     try:
@@ -271,7 +290,7 @@ def read_outdoor_temp() -> float | None:
         if "YES" in lines[0]:
             eq = lines[1].find("t=")
             if eq != -1:
-                temp_c = float(lines[1][eq + 2:]) / 1000.0
+                temp_c = float(lines[1][eq + 2 :]) / 1000.0
                 return round((temp_c * 9 / 5) + 32, 2)
         return None
     except Exception as e:
@@ -284,11 +303,11 @@ def get_outdoor_temp_api() -> float | None:
         resp = requests.get(
             "https://api.open-meteo.com/v1/forecast",
             params={
-                "latitude":         FARM_LAT,
-                "longitude":        FARM_LON,
-                "current":          "temperature_2m",
+                "latitude": FARM_LAT,
+                "longitude": FARM_LON,
+                "current": "temperature_2m",
                 "temperature_unit": "fahrenheit",
-                "forecast_days":    1,
+                "forecast_days": 1,
             },
             timeout=10,
         )
@@ -307,6 +326,7 @@ def get_outdoor_temp() -> float | None:
 
 # --- Fan relay ---
 
+
 def setup_gpio():
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(RELAY_PIN, GPIO.OUT)
@@ -318,29 +338,52 @@ def set_fan(on: bool):
     log.info("[Fan] %s", "ON" if on else "OFF")
 
 
+# Set to True to force fan ON regardless of conditions (for testing)
+TEST_FAN_ON = True
+
 # --- Main control loop ---
+
 
 async def control_loop():
     while True:
         try:
-            async with CoolBotClient() as cb:
-                if not cb.is_running:
-                    log.warning("[CoolBot] Offline or off — fan OFF")
-                    set_fan(False)
-                else:
-                    outdoor = get_outdoor_temp()
-                    room = cb.room_temp
-                    setpoint = cb.set_temp_f
-
-                    if None in (outdoor, room, setpoint):
-                        log.warning("[Fan] Missing data (outdoor=%s, room=%s, setpoint=%s) — fan OFF", outdoor, room, setpoint)
+            if TEST_FAN_ON:
+                log.info("[Fan] TEST MODE — fan forced ON")
+                set_fan(True)
+            else:
+                async with CoolBotClient() as cb:
+                    if not cb.is_running:
+                        log.warning("[CoolBot] Offline or off — fan OFF")
                         set_fan(False)
-                    elif outdoor < setpoint < room:
-                        log.info("[Fan] outdoor=%.1f°F < setpoint=%.1f°F < room=%.1f°F — fan ON", outdoor, setpoint, room)
-                        set_fan(True)
                     else:
-                        log.info("[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F — fan OFF", outdoor, setpoint, room)
-                        set_fan(False)
+                        outdoor = get_outdoor_temp()
+                        room = cb.room_temp
+                        setpoint = cb.set_temp_f
+
+                        if None in (outdoor, room, setpoint):
+                            log.warning(
+                                "[Fan] Missing data (outdoor=%s, room=%s, setpoint=%s) — fan OFF",
+                                outdoor,
+                                room,
+                                setpoint,
+                            )
+                            set_fan(False)
+                        elif outdoor < setpoint < room:
+                            log.info(
+                                "[Fan] outdoor=%.1f°F < setpoint=%.1f°F < room=%.1f°F — fan ON",
+                                outdoor,
+                                setpoint,
+                                room,
+                            )
+                            set_fan(True)
+                        else:
+                            log.info(
+                                "[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F — fan OFF",
+                                outdoor,
+                                setpoint,
+                                room,
+                            )
+                            set_fan(False)
 
         except Exception as e:
             log.error("[Fan] Control loop error: %s — fan OFF", e, exc_info=True)
