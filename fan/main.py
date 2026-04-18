@@ -211,7 +211,7 @@ class CoolBotClient:
                 if raw_power is not None:
                     try:
                         self.power_on = bool(int(raw_power))
-                    except ValueError, TypeError:
+                    except (ValueError, TypeError):
                         pass
                 break
 
@@ -236,7 +236,7 @@ class CoolBotClient:
             self._listen_task.cancel()
             try:
                 await self._listen_task
-            except asyncio.CancelledError, Exception:
+            except (asyncio.CancelledError, Exception):
                 pass
 
     async def _listen(self):
