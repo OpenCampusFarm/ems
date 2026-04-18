@@ -8,6 +8,8 @@ import struct
 import zlib
 from pathlib import Path
 
+import requests
+
 try:
     import RPi.GPIO as GPIO
 except ImportError:
@@ -251,14 +253,17 @@ class CoolBotClient:
                 self._ready.set()
 
 
-# --- Outdoor temperature (DS18B20) ---
+# --- Outdoor temperature ---
+
+FARM_LAT = 42.2942
+FARM_LON = -83.7104
 
 def read_outdoor_temp() -> float | None:
     try:
         base_dir = "/sys/bus/w1/devices/"
         sensors = [f for f in os.listdir(base_dir) if f.startswith("28-")]
         if not sensors:
-            log.warning("[Sensor] No DS18B20 sensors found")
+            log.warning("[Sensor] No DS18B20 sensors found, falling back to Open-Meteo")
             return None
         device_file = f"{base_dir}{sensors[0]}/w1_slave"
         with open(device_file) as f:
@@ -274,12 +279,38 @@ def read_outdoor_temp() -> float | None:
         return None
 
 
+def get_outdoor_temp_api() -> float | None:
+    try:
+        resp = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude":         FARM_LAT,
+                "longitude":        FARM_LON,
+                "current":          "temperature_2m",
+                "temperature_unit": "fahrenheit",
+                "forecast_days":    1,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        temp = float(resp.json()["current"]["temperature_2m"])
+        log.info("[Sensor] Outdoor temp (Open-Meteo fallback) = %.1f°F", temp)
+        return temp
+    except Exception as e:
+        log.error("[Sensor] Open-Meteo fallback failed: %s", e)
+        return None
+
+
+def get_outdoor_temp() -> float | None:
+    return read_outdoor_temp() or get_outdoor_temp_api()
+
+
 # --- Fan relay ---
 
 def setup_gpio():
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(RELAY_PIN, GPIO.OUT)
-    GPIO.output(RELAY_PIN, GPIO.LOW)
+    GPIO.output(RELAY_PIN, GPIO.LOW)  # LOW = relay off at startup
 
 
 def set_fan(on: bool):
@@ -297,7 +328,7 @@ async def control_loop():
                     log.warning("[CoolBot] Offline or off — fan OFF")
                     set_fan(False)
                 else:
-                    outdoor = read_outdoor_temp()
+                    outdoor = get_outdoor_temp()
                     room = cb.room_temp
                     setpoint = cb.set_temp_f
 
