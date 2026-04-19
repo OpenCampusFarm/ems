@@ -37,7 +37,7 @@ RELAY_PIN = 23
 POLL_INTERVAL = 30  # seconds between checks
 # Set to True to force fan ON regardless of conditions (for testing)
 TEST_FAN_ON = False
-
+HYSTERESIS = 2.0  # °F deadband
 # --- CoolBot config ---
 BLYNK_URL = "wss://cbws.storeitcold.com/websocket"
 EMAIL = os.environ.get("SIT_EMAIL")
@@ -346,6 +346,7 @@ def set_fan(on: bool):
 
 
 async def control_loop():
+    fan_on = False
     while True:
         try:
             if TEST_FAN_ON:
@@ -355,6 +356,7 @@ async def control_loop():
                 async with CoolBotClient() as cb:
                     if not cb.is_running:
                         log.warning("[CoolBot] Offline or off — fan OFF")
+                        fan_on = False
                         set_fan(False)
                     else:
                         outdoor = get_outdoor_temp()
@@ -368,8 +370,13 @@ async def control_loop():
                                 room,
                                 setpoint,
                             )
+                            fan_on = False
                             set_fan(False)
-                        elif outdoor < setpoint < room:
+                        elif not fan_on and (
+                            outdoor + HYSTERESIS < setpoint
+                            and room > setpoint + HYSTERESIS
+                        ):
+                            fan_on = True
                             log.info(
                                 "[Fan] outdoor=%.1f°F < setpoint=%.1f°F < room=%.1f°F — fan ON",
                                 outdoor,
@@ -377,7 +384,8 @@ async def control_loop():
                                 room,
                             )
                             set_fan(True)
-                        else:
+                        elif fan_on and (outdoor >= setpoint or room <= setpoint):
+                            fan_on = False
                             log.info(
                                 "[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F — fan OFF",
                                 outdoor,
@@ -385,9 +393,18 @@ async def control_loop():
                                 room,
                             )
                             set_fan(False)
+                        else:
+                            log.info(
+                                "[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F — fan %s (no change)",
+                                outdoor,
+                                setpoint,
+                                room,
+                                "ON" if fan_on else "OFF",
+                            )
 
         except Exception as e:
             log.error("[Fan] Control loop error: %s — fan OFF", e, exc_info=True)
+            fan_on = False
             set_fan(False)
 
         await asyncio.sleep(POLL_INTERVAL)

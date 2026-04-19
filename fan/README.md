@@ -15,8 +15,11 @@ Every 30 seconds:
 1. Connect to the CoolBot and read its state
 2. If CoolBot is **offline or off** → fan OFF
 3. If CoolBot is **on**, read outdoor temp (`outdoor`) and compare with room temp (`room`) and CoolBot setpoint (`setpoint`):
-   - `outdoor < setpoint < room` → fan **ON** (outside is cooler than setpoint; free cooling)
-   - anything else → fan **OFF**
+   - Fan turns **ON** when: `outdoor + 2 < setpoint` AND `room > setpoint + 2`
+   - Fan turns **OFF** when: `outdoor >= setpoint` OR `room <= setpoint`
+   - Otherwise fan state is **unchanged** (hysteresis deadband prevents rapid on/off cycling)
+
+The 2°F hysteresis (`HYSTERESIS` in `main.py`) ensures the fan doesn't oscillate when temperatures are close to the setpoint.
 
 ## Raspberry Pi Access
 
