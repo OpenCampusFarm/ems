@@ -35,6 +35,8 @@ log = logging.getLogger(__name__)
 # --- Fan / Relay config ---
 RELAY_PIN = 23
 POLL_INTERVAL = 30  # seconds between checks
+# Set to True to force fan ON regardless of conditions (for testing)
+TEST_FAN_ON = False
 
 # --- CoolBot config ---
 BLYNK_URL = "wss://cbws.storeitcold.com/websocket"
@@ -252,8 +254,9 @@ class CoolBotClient:
             elif cmd == CMD_HARDWARE_DISCONNECTED:
                 self.hw_online = False
             elif cmd in (CMD_APP_SYNC, CMD_HARDWARE):
-                if (parsed.get("pin_type") == "vw"
-                        and parsed.get("device_ref") == str(self._dashboard_id)):
+                if parsed.get("pin_type") == "vw" and parsed.get("device_ref") == str(
+                    self._dashboard_id
+                ):
                     pin = parsed.get("pin")
                     values = parsed.get("value", [])
                     if values:
@@ -338,9 +341,6 @@ def set_fan(on: bool):
     GPIO.output(RELAY_PIN, GPIO.HIGH if on else GPIO.LOW)
     log.info("[Fan] %s", "ON" if on else "OFF")
 
-
-# Set to True to force fan ON regardless of conditions (for testing)
-TEST_FAN_ON = False
 
 # --- Main control loop ---
 
