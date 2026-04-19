@@ -252,7 +252,8 @@ class CoolBotClient:
             elif cmd == CMD_HARDWARE_DISCONNECTED:
                 self.hw_online = False
             elif cmd in (CMD_APP_SYNC, CMD_HARDWARE):
-                if parsed.get("pin_type") == "vw":
+                if (parsed.get("pin_type") == "vw"
+                        and parsed.get("device_ref") == str(self._dashboard_id)):
                     pin = parsed.get("pin")
                     values = parsed.get("value", [])
                     if values:
