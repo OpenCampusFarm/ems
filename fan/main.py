@@ -36,7 +36,7 @@ log = logging.getLogger(__name__)
 RELAY_PIN = 23
 POLL_INTERVAL = 30  # seconds between checks
 # Set to True to force fan ON regardless of conditions (for testing)
-TEST_FAN_ON = False
+TEST_FAN_ON = True
 
 # --- CoolBot config ---
 BLYNK_URL = "wss://cbws.storeitcold.com/websocket"
