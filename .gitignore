@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 pi_project_extracted/
 .ruff_cache
+uv.lock
