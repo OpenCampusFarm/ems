@@ -52,6 +52,14 @@ Managed by supervisord (Go implementation) as part of the `ems` project — see 
 
 The service runs supervisord as root so the fan program can access GPIO. Core and updater programs run as `pi`.
 
-## Testing
+## Fan mode override
 
-To force the fan on regardless of conditions, set `TEST_FAN_ON = True` in `main.py`. Remember to set it back to `False` for normal operation.
+`FAN_MODE` in `main.py` controls override behavior:
+
+| Value | Behavior |
+|-------|----------|
+| `FanMode.AUTO` | Normal EMS-controlled operation (default) |
+| `FanMode.FORCE_ON` | Fan always ON regardless of conditions |
+| `FanMode.FORCE_OFF` | Fan always OFF regardless of conditions |
+
+In all modes, outdoor temperature and room temperature are still read each cycle and printed in the log.
