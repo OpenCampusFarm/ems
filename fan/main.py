@@ -43,6 +43,10 @@ BLYNK_URL = "wss://cbws.storeitcold.com/websocket"
 EMAIL = os.environ.get("SIT_EMAIL")
 PASSWORD = os.environ.get("SIT_PASSWORD")
 
+# The coordinates for the UM Campus Farm
+FARM_LAT = 42.3005
+FARM_LON = -83.6655
+
 # --- CoolBot protocol constants ---
 CMD_RESPONSE = 0x00
 CMD_LOGIN = 0x02
@@ -276,9 +280,6 @@ class CoolBotClient:
 
 
 # --- Outdoor temperature ---
-
-FARM_LAT = 42.2942
-FARM_LON = -83.7104
 
 
 def read_outdoor_temp() -> float | None:
