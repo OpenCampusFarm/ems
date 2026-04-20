@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import enum
 import hashlib
 import json
 import logging
@@ -32,11 +33,17 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+
+class FanMode(enum.Enum):
+    AUTO = "auto"  # normal EMS-controlled behavior
+    FORCE_ON = "on"  # always on, regardless of conditions
+    FORCE_OFF = "off"  # always off, regardless of conditions
+
+
 # --- Fan / Relay config ---
 RELAY_PIN = 23
 POLL_INTERVAL = 30  # seconds between checks
-# Set to True to force fan ON regardless of conditions (for testing)
-TEST_FAN_ON = False
+FAN_MODE = FanMode.FORCE_OFF
 HYSTERESIS = 2.0  # °F deadband
 # --- CoolBot config ---
 BLYNK_URL = "wss://cbws.storeitcold.com/websocket"
@@ -350,58 +357,68 @@ async def control_loop():
     fan_on = False
     while True:
         try:
-            if TEST_FAN_ON:
-                log.info("[Fan] TEST MODE — fan forced ON")
-                set_fan(True)
-            else:
-                async with CoolBotClient() as cb:
-                    if not cb.is_running:
-                        log.warning("[CoolBot] Offline or off — fan OFF")
-                        fan_on = False
-                        set_fan(False)
-                    else:
-                        outdoor = get_outdoor_temp()
-                        room = cb.room_temp
-                        setpoint = cb.set_temp_f
+            async with CoolBotClient() as cb:
+                outdoor = get_outdoor_temp()
+                room = cb.room_temp
+                setpoint = cb.set_temp_f
 
-                        if None in (outdoor, room, setpoint):
-                            log.warning(
-                                "[Fan] Missing data (outdoor=%s, room=%s, setpoint=%s) — fan OFF",
-                                outdoor,
-                                room,
-                                setpoint,
-                            )
-                            fan_on = False
-                            set_fan(False)
-                        elif not fan_on and (
-                            outdoor + HYSTERESIS < setpoint
-                            and room > setpoint + HYSTERESIS
-                        ):
-                            fan_on = True
-                            log.info(
-                                "[Fan] outdoor=%.1f°F < setpoint=%.1f°F < room=%.1f°F — fan ON",
-                                outdoor,
-                                setpoint,
-                                room,
-                            )
-                            set_fan(True)
-                        elif fan_on and (outdoor >= setpoint or room <= setpoint):
-                            fan_on = False
-                            log.info(
-                                "[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F — fan OFF",
-                                outdoor,
-                                setpoint,
-                                room,
-                            )
-                            set_fan(False)
-                        else:
-                            log.info(
-                                "[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F — fan %s (no change)",
-                                outdoor,
-                                setpoint,
-                                room,
-                                "ON" if fan_on else "OFF",
-                            )
+                if FAN_MODE is FanMode.FORCE_ON:
+                    log.info(
+                        "[Fan] FORCE_ON — fan forced ON (outdoor=%s°F, room=%s°F)",
+                        f"{outdoor:.1f}" if outdoor is not None else "N/A",
+                        f"{room:.1f}" if room is not None else "N/A",
+                    )
+                    fan_on = True
+                    set_fan(True)
+                elif FAN_MODE is FanMode.FORCE_OFF:
+                    log.info(
+                        "[Fan] FORCE_OFF — fan forced OFF (outdoor=%s°F, room=%s°F)",
+                        f"{outdoor:.1f}" if outdoor is not None else "N/A",
+                        f"{room:.1f}" if room is not None else "N/A",
+                    )
+                    fan_on = False
+                    set_fan(False)
+                elif not cb.is_running:
+                    log.warning("[CoolBot] Offline or off — fan OFF")
+                    fan_on = False
+                    set_fan(False)
+                elif None in (outdoor, room, setpoint):
+                    log.warning(
+                        "[Fan] Missing data (outdoor=%s, room=%s, setpoint=%s) — fan OFF",
+                        outdoor,
+                        room,
+                        setpoint,
+                    )
+                    fan_on = False
+                    set_fan(False)
+                elif not fan_on and (
+                    outdoor + HYSTERESIS < setpoint and room > setpoint + HYSTERESIS
+                ):
+                    fan_on = True
+                    log.info(
+                        "[Fan] outdoor=%.1f°F < setpoint=%.1f°F < room=%.1f°F — fan ON",
+                        outdoor,
+                        setpoint,
+                        room,
+                    )
+                    set_fan(True)
+                elif fan_on and (outdoor >= setpoint or room <= setpoint):
+                    fan_on = False
+                    log.info(
+                        "[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F — fan OFF",
+                        outdoor,
+                        setpoint,
+                        room,
+                    )
+                    set_fan(False)
+                else:
+                    log.info(
+                        "[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F — fan %s (no change)",
+                        outdoor,
+                        setpoint,
+                        room,
+                        "ON" if fan_on else "OFF",
+                    )
 
         except Exception as e:
             log.error("[Fan] Control loop error: %s — fan OFF", e, exc_info=True)
