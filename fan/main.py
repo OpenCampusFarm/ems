@@ -43,7 +43,7 @@ class FanMode(enum.Enum):
 # --- Fan / Relay config ---
 RELAY_PIN = 23
 POLL_INTERVAL = 30  # seconds between checks
-FAN_MODE = FanMode.FORCE_OFF
+FAN_MODE = FanMode.AUTO
 HYSTERESIS = 2.0  # °F deadband
 # --- CoolBot config ---
 BLYNK_URL = "wss://cbws.storeitcold.com/websocket"
