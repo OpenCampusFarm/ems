@@ -39,7 +39,7 @@ class FanMode(enum.Enum):
 # --- Fan / Relay config ---
 RELAY_PIN = 23
 POLL_INTERVAL = 30  # seconds between checks
-FAN_MODE = FanMode.FORCE_ON
+FAN_MODE = FanMode.FORCE_OFF
 HYSTERESIS = 2.0  # °F deadband
 
 # The coordinates for the UM Campus Farm
