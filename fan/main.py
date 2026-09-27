@@ -1,4 +1,6 @@
 import asyncio
+import csv
+from datetime import date, timedelta
 import enum
 import logging
 import os
@@ -92,7 +94,83 @@ def get_outdoor_temp_api() -> float | None:
         log.error("[Sensor] Open-Meteo fallback failed: %s", e)
         return None
 
+def save_historical_outdoor_temps_csv( 
+    
+    output_file: str | Path = "outdoor_temperatures.csv",
+    end_date = None,
+    days: int = 30,
+) -> Path | None:
+    """
+    Retrieve hourly historical temperatures and save them to a CSV.
 
+    CSV columns:
+        timestamp, temperature_f
+
+    Returns the output path on success, or None on failure.
+    """
+    try:
+        if days < 1:
+            raise ValueError("days must be at least 1")
+
+        output_path = Path(output_file)
+
+        if end_date is None:
+            # Use yesterday because archive data may not include today.
+            end_date = date.today() - timedelta(days=1)
+
+        # Open-Meteo's start and end dates are inclusive.
+        start_date = end_date - timedelta(days=days - 1)
+
+        resp = requests.get(
+            "https://archive-api.open-meteo.com/v1/archive",
+            params={
+                "latitude": FARM_LAT,
+                "longitude": FARM_LON,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "hourly": "temperature_2m",
+                "temperature_unit": "fahrenheit",
+                "timezone": "America/Detroit",
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+
+        hourly = resp.json()["hourly"]
+        timestamps = hourly["time"]
+        temperatures = hourly["temperature_2m"]
+
+        if len(timestamps) != len(temperatures):
+            raise ValueError("Open-Meteo returned mismatched hourly data")
+
+        # Create parent directories if necessary.
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with output_path.open("w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(["timestamp", "temperature_f"])
+            writer.writerows(zip(timestamps, temperatures))
+
+        log.info(
+            "[Sensor] Saved %d hourly outdoor temperatures "
+            "from %s through %s to %s",
+            len(timestamps),
+            start_date,
+            end_date,
+            output_path,
+        )
+
+        return output_path
+
+    except (
+        requests.RequestException,
+        KeyError,
+        TypeError,
+        ValueError,
+        OSError,
+    ) as e:
+        log.error("[Sensor] Failed to save historical temperatures: %s", e)
+        return None
 def get_outdoor_temp() -> float | None:
     return read_outdoor_temp() or get_outdoor_temp_api()
 
@@ -202,4 +280,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+   #main()
+   save_historical_outdoor_temps_csv()
+   
+
+    

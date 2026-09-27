@@ -107,23 +107,34 @@ def select_device(profile, dashboard_id=None, device_id=None):
     return dashboard["id"], devices[0]["id"]
 
 
-def make_rows(points, start_ms, end_ms):
-    # Pages may overlap. Keep the first value, from the newest page, per time.
-    unique = {}
-    for timestamp_ms, value in points:
-        if start_ms <= timestamp_ms <= end_ms:
-            unique.setdefault(timestamp_ms, value if math.isfinite(value) else None)
+def make_rows(room_points, set_points, start_ms, end_ms):
+    """Return rows only for timestamps containing a room temperature."""
+
+    def collect(points):
+        unique = {}
+        for timestamp_ms, value in points:
+            if start_ms <= timestamp_ms <= end_ms:
+                unique.setdefault(
+                    timestamp_ms,
+                    value if math.isfinite(value) else None,
+                )
+        return unique
+
+    room_by_time = collect(room_points)
+    set_by_time = collect(set_points)
+
     return [
         {
             "timestamp_local": datetime.fromtimestamp(
-                timestamp_ms / 1000, MICHIGAN_TZ
+                timestamp_ms / 1000,
+                MICHIGAN_TZ,
             ).isoformat(timespec="milliseconds"),
-            "room_temp_f": value,
+            "room_temp_f": room_temp,
+            "set_temp_f": set_by_time.get(timestamp_ms),
         }
-        for timestamp_ms, value in sorted(unique.items())
+        for timestamp_ms, room_temp in sorted(room_by_time.items())
+        if room_temp is not None
     ]
-
-
 async def fetch_history(days=30, dashboard_id=None, device_id=None, timeout=30):
     if not coolbot.EMAIL or not coolbot.PASSWORD:
         raise ValueError(
@@ -132,7 +143,8 @@ async def fetch_history(days=30, dashboard_id=None, device_id=None, timeout=30):
     end = datetime.now(UTC)
     start_ms = int((end - timedelta(days=days)).timestamp() * 1000)
     end_ms = int(end.timestamp() * 1000)
-    points = []
+    room_points = []
+    set_points = []
     async with websockets.connect(
         coolbot.BLYNK_URL, open_timeout=timeout, close_timeout=5
     ) as ws:
@@ -161,28 +173,50 @@ async def fetch_history(days=30, dashboard_id=None, device_id=None, timeout=30):
         # than a calendar day when there are gaps. Stop on the timestamp cutoff.
         # One extra page covers boundaries if the server aligns pages to buckets.
         # Don't stop at an empty page: there can be gaps between older readings.
-        for page in range(days + 1):
-            fields = [f"{dashboard_id}-{device_id}", "v0", "DAY"]
-            if page:
-                fields.append(str(page))
-            raw = await request(
-                ws,
-                coolbot.build_text_packet(CMD_GRAPH, "\0".join(fields), 10 + page),
-                CMD_GRAPH,
-                timeout,
-            )
-            series = decode_graph(raw[5:])
-            if len(series) > 1:
-                raise ValueError("Expected one room-temperature series for v0")
-            page_points = series[0] if series else []
-            points.extend(page_points)
-            print(
-                f"Page {page + 1}/{days + 1}: {len(page_points)} samples",
-                file=sys.stderr,
-            )
-            if page_points and min(t for t, _ in page_points) <= start_ms:
-                break
-    return make_rows(points, start_ms, end_ms)
+        pins = [
+            ("v0", room_points, "room temperature"),
+            (f"v{coolbot.PIN_SET_TEMP}", set_points, "set temperature"),
+        ]
+
+        for pin, destination, description in pins:
+            for page in range(days + 1):
+                fields = [f"{dashboard_id}-{device_id}", pin, "DAY"]
+                if page:
+                    fields.append(str(page))
+
+                raw = await request(
+                    ws,
+                    coolbot.build_text_packet(
+                        CMD_GRAPH,
+                        "\0".join(fields),
+                        10 + page,
+                    ),
+                    CMD_GRAPH,
+                    timeout,
+                )
+
+                series = decode_graph(raw[5:])
+
+                if len(series) > 1:
+                    raise ValueError(
+                        f"Expected one {description} series for {pin}"
+                    )
+
+                page_points = series[0] if series else []
+                destination.extend(page_points)
+
+                print(
+                    f"{description}, page {page + 1}/{days + 1}: "
+                    f"{len(page_points)} samples",
+                    file=sys.stderr,
+                )
+
+                if (
+                    page_points
+                    and min(timestamp for timestamp, _ in page_points) <= start_ms
+                ):
+                    break
+    return make_rows(room_points, set_points, start_ms, end_ms)
 
 
 def write_export(rows, output: Path, file_format: str):
@@ -200,9 +234,7 @@ def write_export(rows, output: Path, file_format: str):
         ) as stream:
             temporary = Path(stream.name)
             if file_format == "csv":
-                writer = csv.DictWriter(
-                    stream, fieldnames=["timestamp_local", "room_temp_f"]
-                )
+                writer = csv.DictWriter(stream, fieldnames=rows[0].keys())
                 writer.writeheader()
                 writer.writerows(rows)
             else:
@@ -261,8 +293,14 @@ def cli():
         return 1
     except KeyboardInterrupt:
         return 130
-    valid = sum(row["room_temp_f"] is not None for row in rows)
-    print(f"Saved {len(rows)} samples ({valid} valid temperatures) to {output}")
+    valid_room = sum(row["room_temp_f"] is not None for row in rows)
+    valid_set = sum(row["set_temp_f"] is not None for row in rows)
+
+    print(
+       f"Saved {len(rows)} timestamps "
+       f"({valid_room} room temperatures, {valid_set} set temperatures) "
+       f"to {output}"
+    )
     print(
         f"America/Detroit range: {rows[0]['timestamp_local']} "
         f"to {rows[-1]['timestamp_local']}"

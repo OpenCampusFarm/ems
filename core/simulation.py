@@ -28,7 +28,6 @@ import pandas as pd
 # ── Constants ─────────────────────────────────────────────────────────────────
 SETPOINT_COOLTH  = 35     # °F — low setpoint (clean energy available)
 SETPOINT_ECON    = 48     # °F — high setpoint (dirty / no renewable energy)
-
 EV_CAPACITY      = 131.0  # kWh  (F-150 Lightning extended range)
 EV_CHARGE_RATE   = 11.5   # kW
 EV_CHARGE_EFF    = 0.90
@@ -93,6 +92,7 @@ class PV:
 
 # ── Cooler model ──────────────────────────────────────────────────────────────
 
+
 class Cooler:
     def __init__(
         self,
@@ -129,7 +129,10 @@ class Cooler:
         q_remove = self.ri * self.power_kw * self.cop if self._on else 0.0
         self.temp = alpha * self.temp + (1.0 - alpha) * (self.ambient - q_remove)
 
-    def update(self) -> None:
+    def update(self, outdoor_f: float | None = None) -> None:
+        if outdoor_f is not None:
+            self.ambient = float(outdoor_f)
+
         self._thermostat()
         self._thermal_step()
 
@@ -139,8 +142,6 @@ class Cooler:
     @property
     def instant_power_kw(self) -> float:
         return self.power_kw if self._on else 0.0
-
-
 # ── EV model ──────────────────────────────────────────────────────────────────
 
 class EV:
@@ -184,28 +185,156 @@ def ems_setpoint(pv_kw: float, moer: float, cooler_temp: float) -> int:
     energy_clean = pv_kw >= PV_MIN_PRODUCING or moer < CO2_THRESHOLD
     return SETPOINT_COOLTH if energy_clean else SETPOINT_ECON
 
+def _load_outdoor_temperatures(
+    outdoor_csv_path: str | Path,
+    simulation_date: str | pd.Timestamp | None = None,
+) -> pd.Series:
+    """
+    Read hourly outdoor temperatures and interpolate them to one-minute values.
 
-# ── Simulation ────────────────────────────────────────────────────────────────
-
-def simulate(csv_path: str | None = None) -> None:
-    pv     = PV(csv_path=csv_path)
-    cooler = Cooler()
-    ev     = EV()
-
-    setpoints, cooler_temps, ev_socs, pv_powers, cooler_loads, moers = (
-        [] for _ in range(6)
+    The returned Series:
+      - has timestamps as its index;
+      - has outdoor temperatures in °F as its values;
+      - uses the America/Detroit time zone.
+    """
+    outdoor = pd.read_csv(
+        outdoor_csv_path,
+        usecols=["timestamp", "temperature_f"],
     )
 
-    for minute in range(1440):
-        pv_kw = pv.update(minute)
-        moer  = synthetic_moer(minute)
-        cooler.update()
+    outdoor["temperature_f"] = pd.to_numeric(
+        outdoor["temperature_f"],
+        errors="coerce",
+    )
 
-        sp = ems_setpoint(pv_kw, moer, cooler.temp)
+    outdoor["timestamp"] = pd.to_datetime(
+        outdoor["timestamp"],
+        errors="coerce",
+    )
+
+    if outdoor["timestamp"].dt.tz is None:
+        outdoor["timestamp"] = outdoor["timestamp"].dt.tz_localize(
+            "America/Detroit",
+            ambiguous="infer",
+            nonexistent="shift_forward",
+        )
+    else:
+        outdoor["timestamp"] = outdoor["timestamp"].dt.tz_convert(
+            "America/Detroit"
+        )
+
+    outdoor = (
+        outdoor
+        .dropna(subset=["timestamp", "temperature_f"])
+        .sort_values("timestamp")
+        .drop_duplicates(subset=["timestamp"], keep="last")
+    )
+
+    if outdoor.empty:
+        raise ValueError(
+            f"No valid outdoor-temperature data found in {outdoor_csv_path}"
+        )
+
+    outdoor_by_minute = (
+        outdoor
+        .set_index("timestamp")["temperature_f"]
+        .resample("1min")
+        .interpolate(method="time")
+    )
+
+    if simulation_date is None:
+        start = outdoor_by_minute.index.min().normalize()
+    else:
+        start = pd.Timestamp(simulation_date)
+
+        if start.tzinfo is None:
+            start = start.tz_localize("America/Detroit")
+        else:
+            start = start.tz_convert("America/Detroit")
+
+        start = start.normalize()
+
+    end = start + pd.DateOffset(days=1)
+
+    outdoor_day = outdoor_by_minute.loc[
+        (outdoor_by_minute.index >= start)
+        & (outdoor_by_minute.index < end)
+    ]
+
+    if outdoor_day.empty:
+        raise ValueError(
+            f"No outdoor-temperature data found for {start.date()}"
+        )
+
+    return outdoor_day
+# ── Simulation ────────────────────────────────────────────────────────────────
+
+def simulate(
+    pv_csv_path: str | None = None,
+    cooler_csv_path: str | None = None,
+    outdoor_csv_path: str = "core/Data/outdoor_temperatures.csv",
+    simulation_date: str | pd.Timestamp | None = None,
+) -> None:
+    pv = PV(csv_path=pv_csv_path)
+    cooler = Cooler()
+    ev = EV()
+
+    outdoor_day = _load_outdoor_temperatures(
+        outdoor_csv_path,
+        simulation_date=simulation_date,
+    )
+    simulation_start = outdoor_day.index.min().normalize()
+    simulation_times = pd.date_range(
+        start=simulation_start,
+        periods=1440,
+        freq="1min",
+    )
+    outdoor_temps = outdoor_day.reindex(
+        simulation_times,
+        method="nearest",
+        tolerance=pd.Timedelta("1 hour"),
+    )
+    if outdoor_temps.isna().any():
+        missing = int(outdoor_temps.isna().sum())
+        raise ValueError(
+            f"Missing outdoor temperature for {missing} simulation minutes"
+        )
+  
+    cooler.ambient = float(outdoor_temps.iloc[0])
+
+    (
+        setpoints,
+        cooler_temps,
+        ev_socs,
+        pv_powers,
+        cooler_loads,
+        moers,
+    ) = ([] for _ in range(6))
+
+    for step, timestamp in enumerate(simulation_times):
+        outdoor_f = float(outdoor_temps.iloc[step])
+        minute_of_day = timestamp.hour * 60 + timestamp.minute
+
+        pv_kw = pv.update(minute_of_day)
+        moer = synthetic_moer(minute_of_day)
+
+        sp = ems_setpoint(
+            pv_kw,
+            moer,
+            cooler.temp,
+        )
         cooler.change_setpoint(sp)
+        cooler.update(outdoor_f=outdoor_f)
 
-        energy_clean = pv_kw >= PV_MIN_PRODUCING or moer < CO2_THRESHOLD
-        ev.charge() if energy_clean else ev.idle()
+        energy_clean = (
+            pv_kw >= PV_MIN_PRODUCING
+            or moer < CO2_THRESHOLD
+        )
+
+        if energy_clean:
+            ev.charge()
+        else:
+            ev.idle()
 
         setpoints.append(sp)
         cooler_temps.append(cooler.temp)
@@ -273,4 +402,4 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Campus Farm EMS — 1-day simulation")
     parser.add_argument("--csv", metavar="PATH", help="CSV with 'Minute' and 'Power' columns")
     args = parser.parse_args()
-    simulate(csv_path=args.csv)
+    simulate(pv_csv_path=args.csv)
