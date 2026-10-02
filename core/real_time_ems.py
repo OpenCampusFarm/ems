@@ -181,7 +181,8 @@ def run_ems_cycle() -> None:
 
     moer = get_grid_moer()
     room_temp = _retry(get_room_temp, retries=2, label="CoolBot room temp")
-    ev_data = _retry(get_ev_status, retries=3, label="OpenEVSE")
+    # Local-network device: no retries, the next cycle tries again.
+    ev_data = get_ev_status()
     egauge = _retry(get_egauge_data, retries=2, label="eGauge")
 
     pv_w = power["pv"]
@@ -237,7 +238,7 @@ def run_ems_cycle() -> None:
         log.info("[CoolBot] Setpoint unchanged at %d°F", _current_setpoint)
 
     if ev_data is None:
-        log.warning("[EV] OpenEVSE unreachable — skipping charging decision")
+        log.info("[EV] OpenEVSE unavailable — skipping charging decision")
         return
 
     try:

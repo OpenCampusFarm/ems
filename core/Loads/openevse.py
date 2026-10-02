@@ -10,6 +10,7 @@ a person at the charger can always override the EMS.
   DELETE /claims/<client_id>   release the claim
 """
 
+import logging
 import os
 from pathlib import Path
 
@@ -17,6 +18,8 @@ import requests
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / ".env")
+
+log = logging.getLogger(__name__)
 
 OPENEVSE_URI = os.environ.get("OPENEVSE_URI", "http://openevse.local").rstrip("/")
 OPENEVSE_USER = os.environ.get("OPENEVSE_USER")
@@ -56,13 +59,18 @@ def get_status() -> dict | None:
             "charging": state == STATE_CHARGING,
             "power_w": float(raw.get("power", 0) or 0),
         }
-        print(
-            f"OpenEVSE state={state} connected={status['connected']} "
-            f"power={status['power_w']:.0f}W"
+        log.info(
+            "OpenEVSE state=%s connected=%s power=%.0fW",
+            state,
+            status["connected"],
+            status["power_w"],
         )
         return status
+    except (requests.ConnectionError, requests.Timeout):
+        log.info("OpenEVSE not reachable at %s (not on the farm network?)", OPENEVSE_URI)
+        return None
     except Exception as e:
-        print(f"Error fetching OpenEVSE status: {e}")
+        log.error("Error fetching OpenEVSE status: %s", e)
         return None
 
 
