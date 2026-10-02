@@ -5,8 +5,10 @@ Decision logic (every POLL_INTERVAL seconds):
   1. Read SolArk inverter: PV watts, grid watts
   2. Read WattTime grid MOER (lbs CO2/MWh)
   3. "Clean" if PV is producing (>= PV_MIN_WATTS) OR grid MOER < CO2_CLEAN_THRESHOLD
-  4. If clean  → CoolBot setpoint = SETPOINT_COOLTH, start EV charging (if SOC < target)
-     If dirty  → CoolBot setpoint = SETPOINT_ECON,   stop  EV charging
+  4. If clean  → CoolBot setpoint = SETPOINT_COOLTH, allow EV charging
+     If dirty  → CoolBot setpoint = SETPOINT_ECON,   block EV charging
+  EV charging is controlled on the OpenEVSE charger via an EVSE claim (soft control),
+  so the charger's LCD manual override still wins.
 """
 
 import logging
@@ -19,7 +21,8 @@ import requests
 from dotenv import load_dotenv
 
 from Loads.coolbot import change_setpoint, get_room_temp
-from Loads.ev_battery import HA_TOKEN, HA_URI, HA_VIN, check_battery, set_charging
+from Loads.openevse import get_status as get_ev_status
+from Loads.openevse import set_charging
 from solArk_inverter import get_inverter_data
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -49,9 +52,6 @@ _WT_TOKEN_TTL = 25 * 60
 SETPOINT_COOLTH = 45  # °F — low setpoint (clean energy)
 SETPOINT_ECON = 50  # °F — high setpoint (dirty energy)
 SETPOINT_DEFAULT = 48  # °F — neutral fallback
-
-# ── EV ────────────────────────────────────────────────────────────────────────
-EV_SOC_TARGET = 85  # %
 
 # ── Polling ───────────────────────────────────────────────────────────────────
 POLL_INTERVAL = 300  # seconds
@@ -161,23 +161,28 @@ def run_ems_cycle() -> None:
 
     moer = get_grid_moer()
     room_temp = _retry(get_room_temp, retries=2, label="CoolBot room temp")
-    ev_data = _retry(check_battery, retries=3, label="Ford EV")
-    ev_soc = ev_data["percentage"] if ev_data else None
+    ev_data = _retry(get_ev_status, retries=3, label="OpenEVSE")
 
     pv_w = power["pv"]
     grid_w = power["grid"]
     load_w = power["load"]
 
     log.info(
-        "[EMS] %s | PV=%.0fW  Grid=%.0fW  Load=%.0fW  MOER=%s  Room=%s  EV=%s",
+        "[EMS] %s | PV=%.0fW  Grid=%.0fW  Load=%.0fW  MOER=%s  Room=%s",
         datetime.now().strftime("%H:%M:%S"),
         pv_w,
         grid_w,
         load_w,
         f"{moer:.0f}" if moer is not None else "N/A",
         f"{room_temp:.1f}°F" if room_temp is not None else "N/A",
-        f"{ev_soc}%" if ev_soc is not None else "N/A",
     )
+    if ev_data is not None:
+        log.info(
+            "[EV] state=%s connected=%s power=%.0fW",
+            ev_data["state"],
+            ev_data["connected"],
+            ev_data["power_w"],
+        )
 
     pv_producing = pv_w >= PV_MIN_WATTS
     grid_clean = moer is not None and moer < CO2_CLEAN_THRESHOLD
@@ -201,27 +206,18 @@ def run_ems_cycle() -> None:
     else:
         log.info("[CoolBot] Setpoint unchanged at %d°F", _current_setpoint)
 
-    if ev_soc is None:
-        log.warning("[EV] SOC unknown — skipping charging decision")
+    if ev_data is None:
+        log.warning("[EV] OpenEVSE unreachable — skipping charging decision")
         return
 
-    if energy_clean and ev_soc < EV_SOC_TARGET:
-        try:
-            set_charging(True, HA_URI, HA_TOKEN, HA_VIN)
-            log.info("[EV] Charging ON (SOC=%d%%)", ev_soc)
-        except Exception as exc:
-            log.error("[EV] set_charging(True) failed: %s", exc)
-    else:
-        try:
-            set_charging(False, HA_URI, HA_TOKEN, HA_VIN)
-            reason = (
-                "dirty energy"
-                if not energy_clean
-                else f"SOC {ev_soc}% >= target {EV_SOC_TARGET}%"
-            )
-            log.info("[EV] Charging OFF (%s)", reason)
-        except Exception as exc:
-            log.error("[EV] set_charging(False) failed: %s", exc)
+    try:
+        set_charging(energy_clean)
+        if energy_clean:
+            log.info("[EV] Charging allowed (claim active)")
+        else:
+            log.info("[EV] Charging blocked (claim disabled: dirty energy)")
+    except Exception as exc:
+        log.error("[EV] set_charging(%s) failed: %s", energy_clean, exc)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

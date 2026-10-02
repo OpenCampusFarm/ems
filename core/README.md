@@ -1,6 +1,6 @@
 # core
 
-Campus Farm EMS real-time control loop. Reads solar/grid power and carbon intensity every 5 minutes, then adjusts the CoolBot setpoint and Ford EV charging accordingly.
+Campus Farm EMS real-time control loop. Reads solar/grid power and carbon intensity every 5 minutes, then adjusts the CoolBot setpoint and OpenEVSE EV charging accordingly.
 
 ## Project Structure
 
@@ -14,7 +14,7 @@ core/
 ├── simulation.py           # 1-day physics simulation (offline)
 └── Loads/
     ├── coolbot.py          # CoolBot AC controller (Blynk WebSocket)
-    └── ev_battery.py       # Ford EV battery via Home Assistant
+    └── openevse.py         # OpenEVSE charger (HTTP API, EVSE claim)
 ```
 
 ## Decision Logic
@@ -28,8 +28,10 @@ Every `POLL_INTERVAL` seconds (default 300s):
 
 | Condition | CoolBot setpoint | EV charging          |
 | --------- | ---------------- | -------------------- |
-| Clean     | 45°F             | ON (if SOC < target) |
+| Clean     | 45°F             | ON                   |
 | Dirty     | 50°F             | OFF                  |
+
+EV charging is switched with an **EVSE claim** (`POST /claims/<id>`, state `active`/`disabled`, API priority 500), not the manual override, so the charger's LCD / manual override (priority 1000) can still take control. Vehicle SOC is not used; the car ends the charge itself when full.
 
 ## Setup
 
@@ -46,7 +48,8 @@ Key variables:
 | `WT_USERNAME` / `WT_PASSWORD`                           | WattTime API credentials            |
 | `SIT_EMAIL` / `SIT_PASSWORD`                            | CoolBot (Store It Cold) credentials |
 | `SOLARK_USERNAME` / `SOLARK_PASSWORD`                   | SolArk cloud credentials            |
-| `HA_URI` / `HA_TOKEN` / `HA_VIN`                        | Home Assistant for Ford EV          |
+| `OPENEVSE_URI` / `OPENEVSE_USER` / `OPENEVSE_PASSWORD`  | OpenEVSE charger (default `http://openevse.local`, auth optional) |
+| `OPENEVSE_CLAIM_ID`                                     | Numeric EVSE claim client id (default 20) |
 | `EGAUGE_METER_NAME` / `EGAUGE_USER` / `EGAUGE_PASSWORD` | eGauge meter                        |
 
 ## Running
