@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from Loads.coolbot import change_setpoint, get_room_temp
 from Loads.openevse import get_status as get_ev_status
 from Loads.openevse import set_charging
+from egauge_client import EGaugeClient
 from solArk_inverter import get_inverter_data
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -146,6 +147,25 @@ def get_power_data() -> dict | None:
     }
 
 
+# ── eGauge meter (measurement only) ───────────────────────────────────────────
+
+_egauge: EGaugeClient | None = None
+
+
+def get_egauge_data() -> dict | None:
+    global _egauge
+    if _egauge is None:
+        _egauge = EGaugeClient()
+    raw = _egauge.get_all_values()
+    # Grid: negative = exporting. CT polarity makes the load readings negative,
+    # so report them as positive consumption.
+    return {
+        "grid": float(raw["grid_power"]),
+        "cooler": abs(float(raw["cooler_power"])),
+        "ev": abs(float(raw["evcharger_power"])),
+    }
+
+
 # ── EMS decision ─────────────────────────────────────────────────────────────
 
 _current_setpoint: int = SETPOINT_DEFAULT
@@ -162,6 +182,7 @@ def run_ems_cycle() -> None:
     moer = get_grid_moer()
     room_temp = _retry(get_room_temp, retries=2, label="CoolBot room temp")
     ev_data = _retry(get_ev_status, retries=3, label="OpenEVSE")
+    egauge = _retry(get_egauge_data, retries=2, label="eGauge")
 
     pv_w = power["pv"]
     grid_w = power["grid"]
@@ -176,6 +197,15 @@ def run_ems_cycle() -> None:
         f"{moer:.0f}" if moer is not None else "N/A",
         f"{room_temp:.1f}°F" if room_temp is not None else "N/A",
     )
+    if egauge is not None:
+        log.info(
+            "[eGauge] Grid=%.0fW (neg=export)  Cooler=%.0fW  EV=%.0fW",
+            egauge["grid"],
+            egauge["cooler"],
+            egauge["ev"],
+        )
+    else:
+        log.warning("[eGauge] unavailable — measurement skipped")
     if ev_data is not None:
         log.info(
             "[EV] state=%s connected=%s power=%.0fW",

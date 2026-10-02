@@ -26,6 +26,8 @@ Every `POLL_INTERVAL` seconds (default 300s):
 3. Determine if energy is **clean**: PV ≥ 500W **or** MOER < 1400 lbs CO₂/MWh
 4. Apply decision:
 
+(Each cycle also logs eGauge grid / CoolBot / EV power for monitoring; it does not affect the decision.)
+
 | Condition | CoolBot setpoint | EV charging          |
 | --------- | ---------------- | -------------------- |
 | Clean     | 45°F             | ON                   |
