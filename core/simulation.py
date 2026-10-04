@@ -55,6 +55,25 @@ AMBIENT_TEMP     = 70.0   # °F — outside air temperature assumed constant
 TMIN             = 34.0   # °F — safety minimum (freeze prevention)
 TMAX             = 55.0   # °F — safety maximum (spoilage prevention)
 
+PV_CLEAN_ON_KW = 0.7
+PV_CLEAN_OFF_KW = 0.3
+
+MOER_CLEAN_ON = 1350
+MOER_CLEAN_OFF = 1450
+
+MIN_MODE_DWELL_MIN = 15
+
+SETPOINT_COOLTH = 37.0
+SETPOINT_ECON = 48.0
+
+TMIN = 34.0
+TMIN_ENTER = 35.0
+TMIN_RELEASE = 38.0
+
+TMAX = 55.0
+TMAX_ENTER = 54.0
+TMAX_RELEASE = 51.0
+
 # Pytes V5: 100Ah, 51.2V, 50A charge, 100A discharge (180A peak, unused)
 # SOC limits match the current Sol-Ark inverter settings; soc_init is a placeholder for the start of the day
 # TODO(team): seed soc_init from the previous day's ending SOC (night->day->night convergence)
@@ -130,8 +149,6 @@ class PV:
 
 
 # ── Cooler model ──────────────────────────────────────────────────────────────
-
-
 class Cooler:
     def __init__(
         self,
@@ -139,8 +156,11 @@ class Cooler:
         setpoint_f: float = SETPOINT_ECON,
         power_kw: float   = 3.67,
         cop: float        = 2.0,
-        ri: float         = 10.0,
+        ri: float         = 3.0,
         ci: float         = 0.2,
+        cold_capacity_factor: float = 0.75,
+        cold_outdoor_f: float = 60.0,
+        warm_outdoor_f: float = 70.0,
     ):
         self.ambient  = ambient_f
         self.setpoint = setpoint_f
@@ -148,25 +168,67 @@ class Cooler:
         self.cop      = cop
         self.ri       = ri
         self.ci       = ci
+        self.cold_capacity_factor = cold_capacity_factor
+        self.cold_outdoor_f = cold_outdoor_f
+        self.warm_outdoor_f = warm_outdoor_f
         self.dt       = 1.0 / 60.0
-        self.temp     = setpoint_f + 2.0
+        self.temp     = setpoint_f + 1.0
         self._on      = False
 
     @property
-    def _band_high(self) -> float: return self.setpoint + 2.0
+    def _band_high(self) -> float: return self.setpoint + 1.0
     @property
-    def _band_low(self)  -> float: return self.setpoint - 2.0
+    def _band_low(self)  -> float: return self.setpoint - 1.0
 
     def _thermostat(self) -> None:
         if self.temp > self._band_high:
             self._on = True
         elif self.temp < self._band_low:
             self._on = False
+    
+    def _effective_ri(self) -> float:
+        warm_ri = 3.0
+        cold_ri =1.0
+        cold_temp = 50.0
+        warm_temp = 70.0
+
+        fraction = np.clip(
+        (self.ambient - cold_temp)
+        / (warm_temp - cold_temp),
+        0.0,
+        1.0,
+        )
+
+        return cold_ri + fraction * (warm_ri - cold_ri)
+    
+    def _capacity_factor(self) -> float:
+        fraction = np.clip(
+            (self.ambient - self.cold_outdoor_f)
+            / (self.warm_outdoor_f - self.cold_outdoor_f),
+            0.0,
+            1.0,
+        )  
+        return (
+            self.cold_capacity_factor
+            + fraction * (1.0 - self.cold_capacity_factor)
+        )
 
     def _thermal_step(self) -> None:
-        alpha    = np.exp(-self.dt / (self.ci * self.ri))
-        q_remove = self.ri * self.power_kw * self.cop if self._on else 0.0
-        self.temp = alpha * self.temp + (1.0 - alpha) * (self.ambient - q_remove)
+        alpha = np.exp(-self.dt / (self.ci * self._effective_ri()))
+
+        cooling_kw = 0.0
+        if self._on:
+            cooling_kw = (
+                self.power_kw
+                * self.cop
+                * self._capacity_factor()
+            )
+
+        self.temp = (
+            alpha * self.temp
+            + (1.0 - alpha)
+            * (self.ambient - self._effective_ri() * cooling_kw)
+        )
 
     def update(self, outdoor_f: float | None = None) -> None:
         if outdoor_f is not None:
@@ -279,13 +341,56 @@ class Battery:
 
 # ── EMS decision ──────────────────────────────────────────────────────────────
 
-def ems_setpoint(pv_kw: float, moer: float, cooler_temp: float) -> int:
-    if cooler_temp < TMIN:
-        return SETPOINT_ECON
-    if cooler_temp > TMAX:
-        return SETPOINT_COOLTH
-    energy_clean = pv_kw >= PV_MIN_PRODUCING or moer < CO2_THRESHOLD
-    return SETPOINT_COOLTH if energy_clean else SETPOINT_ECON
+class EMSController:
+    def __init__(self):
+        self.clean = False
+        self.safety_mode = None
+        self.minutes_since_change = MIN_MODE_DWELL_MIN
+
+    def setpoint(self, pv_kw: float, moer: float, temp_f: float) -> float:
+        self.minutes_since_change += 1
+
+        # Enter safety modes.
+        if self.safety_mode is None:
+            if temp_f >= TMAX_ENTER:
+                self.safety_mode = "too_hot"
+            elif temp_f <= TMIN_ENTER:
+                self.safety_mode = "too_cold"
+
+        # Latched hot protection.
+        if self.safety_mode == "too_hot":
+            if temp_f > TMAX_RELEASE:
+                return 51.0
+            self.safety_mode = None
+            return 51.0  # Do not switch objectives during the release step.
+
+        # Latched cold protection.
+        if self.safety_mode == "too_cold":
+            if temp_f < TMIN_RELEASE:
+                return 40.0
+            self.safety_mode = None
+            return 40.0
+
+        # Normal signal hysteresis.
+        if self.clean:
+            requested_clean = (
+                pv_kw >= PV_CLEAN_OFF_KW
+                or moer < MOER_CLEAN_OFF
+            )
+        else:
+            requested_clean = (
+                pv_kw >= PV_CLEAN_ON_KW
+                or moer < MOER_CLEAN_ON
+            )
+
+        if (
+            requested_clean != self.clean
+            and self.minutes_since_change >= MIN_MODE_DWELL_MIN
+        ):
+            self.clean = requested_clean
+            self.minutes_since_change = 0
+
+        return SETPOINT_COOLTH if self.clean else SETPOINT_ECON
 
 def _load_outdoor_temperatures(
     outdoor_csv_path: str | Path,
@@ -487,6 +592,7 @@ def run_day(inputs: pd.DataFrame, controller: str = "with-ems") -> pd.DataFrame:
         raise ValueError(f"controller must be one of {CONTROLLERS}")
 
     cooler = Cooler()
+    ems = EMSController()
     ev = EV()
     battery = Battery()
     cooler.ambient = float(inputs["outdoor_f"].iloc[0])
@@ -501,7 +607,7 @@ def run_day(inputs: pd.DataFrame, controller: str = "with-ems") -> pd.DataFrame:
         if controller == "without-ems":
             sp = SETPOINT_NO_EMS
         else:
-            sp = ems_setpoint(pv_kw, moer, cooler.temp)
+            sp = ems.setpoint(pv_kw, moer, cooler.temp)
         cooler.change_setpoint(sp)
         cooler.update(outdoor_f=float(row["outdoor_f"]))
 
