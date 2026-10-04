@@ -357,21 +357,20 @@ class EMSController:
             elif temp_f <= TMIN_ENTER:
                 self.safety_mode = "too_cold"
 
-        # Latched hot protection.
+       
         if self.safety_mode == "too_hot":
             if temp_f > TMAX_RELEASE:
                 return 51.0
             self.safety_mode = None
-            return 51.0  # Do not switch objectives during the release step.
+            return 51.0 
 
-        # Latched cold protection.
+    
         if self.safety_mode == "too_cold":
             if temp_f < TMIN_RELEASE:
                 return 40.0
             self.safety_mode = None
             return 40.0
 
-        # Normal signal hysteresis.
         if self.clean:
             requested_clean = (
                 pv_kw >= PV_CLEAN_OFF_KW
