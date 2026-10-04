@@ -74,6 +74,14 @@ TMAX = 55.0
 TMAX_ENTER = 54.0
 TMAX_RELEASE = 51.0
 
+# Electricity, separate from the cooler's thermal model (Cooler.power_kw stays the
+# fitted cooling capacity). Estimated from the Sol-Ark load port, 9/13–9/26, with EV
+# charging (> 3 kW) removed: ~250 W constant base load (night minimum) and ~5.7 kWh/day
+# above it, taken as the cooler. COOLER_ELECTRIC_KW is set so the No EMS cooler (fixed
+# 38 °F, like the real CoolBot) uses that much over the same two weeks.
+COOLER_ELECTRIC_KW = 0.24   # kW while the cooler is running
+OTHER_LOAD_KW      = 0.25   # kW, lights/standby/controllers on the load port, always on
+
 # Pytes V5: 100Ah, 51.2V, 50A charge, 100A discharge (180A peak, unused)
 # SOC limits match the current Sol-Ark inverter settings; soc_init is a placeholder for the start of the day
 # TODO(team): seed soc_init from the previous day's ending SOC (night->day->night convergence)
@@ -169,10 +177,12 @@ class Cooler:
         cold_capacity_factor: float = 0.75,
         cold_outdoor_f: float = 60.0,
         warm_outdoor_f: float = 70.0,
+        electric_kw: float = COOLER_ELECTRIC_KW,
     ):
         self.ambient  = ambient_f
         self.setpoint = setpoint_f
         self.power_kw = power_kw
+        self.electric_kw = electric_kw  # electricity drawn while on; power_kw drives the cooling
         self.cop      = cop
         self.ri       = ri
         self.ci       = ci
@@ -250,7 +260,7 @@ class Cooler:
 
     @property
     def instant_power_kw(self) -> float:
-        return self.power_kw if self._on else 0.0
+        return self.electric_kw if self._on else 0.0
 
 
 # ── EV model ──────────────────────────────────────────────────────────────────
@@ -324,17 +334,19 @@ class Battery:
         ev_kw: float,
         hour: int,
         dt_hours: float = 1.0 / 60.0,
+        other_kw: float = 0.0,
     ) -> tuple[float, float, float, float]:
         """Sol-Ark order: PV -> loads -> battery -> grid sell; deficit: battery -> grid.
 
-        PV serves the cooler before the EV. The battery only ever covers the cooler
-        (never the EV), and only within the Time of Use slot's discharge limit and Batt %.
-        SOC stays within [soc_min, soc_max].
+        PV serves the cooler and other loads before the EV. The battery covers the
+        cooler and other loads but never the EV, and only within the Time of Use slot's
+        discharge limit and Batt %. SOC stays within [soc_min, soc_max].
         Returns battery kW (charge + / discharge -), grid sell kW, grid buy kW,
         and the part of the battery charge that came from the grid (kW).
         """
         max_discharge_kw, slot_soc, grid_charge = self.tou_slot(hour)
-        surplus_kw = pv_kw - cooler_kw - ev_kw
+        site_kw = cooler_kw + other_kw
+        surplus_kw = pv_kw - site_kw - ev_kw
 
         pv_charge = 0.0
         grid_sell = max(0.0, surplus_kw)
@@ -350,14 +362,14 @@ class Battery:
             grid_charge_kw = min(self.max_charge_power - pv_charge, target_kw)
         self.charge(pv_charge + grid_charge_kw, dt_hours)
 
-        # battery only covers the part of the cooler that PV doesn't
+        # battery only covers the part of the cooler and other loads that PV doesn't
         grid_buy = max(0.0, -surplus_kw) + grid_charge_kw
         discharge_kw = 0.0
         if surplus_kw < 0 and grid_charge_kw == 0.0:
-            cooler_deficit = max(0.0, cooler_kw - pv_kw)
+            site_deficit = max(0.0, site_kw - pv_kw)
             floor = max(self.soc_min, slot_soc)
             available_kw = max(0.0, self._soc_to_kw(self.soc - floor, dt_hours))
-            discharge_kw = min(cooler_deficit, max_discharge_kw, self.max_discharge_power, available_kw)
+            discharge_kw = min(site_deficit, max_discharge_kw, self.max_discharge_power, available_kw)
             self.discharge(discharge_kw, dt_hours)
             grid_buy -= discharge_kw
 
@@ -674,7 +686,8 @@ def run_day(
         # battery dispatch on this minute's loads; the battery never powers the EV
         # TODO(team): confirm the cooler is on the inverter LOAD port ("Limited power to Load")
         batt_power, grid_sell, grid_buy, batt_grid_charge = battery.dispatch(
-            pv_kw, cooler.instant_power_kw, ev.input_power_kw, timestamp.hour
+            pv_kw, cooler.instant_power_kw, ev.input_power_kw, timestamp.hour,
+            other_kw=OTHER_LOAD_KW,
         )
 
         records.append(
@@ -686,6 +699,7 @@ def run_day(
                 "setpoint_f": sp,
                 "cooler_temp_f": cooler.temp,
                 "cooler_kw": cooler.instant_power_kw,
+                "other_load_kw": OTHER_LOAD_KW,
                 "ev_kw": ev.input_power_kw,
                 "ev_plugged": plugged,
                 "ev_soc_percent": ev.soc * 100.0,
@@ -1098,7 +1112,7 @@ def summarize_week(results: pd.DataFrame, controller: str) -> dict:
     after_trip = results.loc[returned[-1]:] if len(returned) else results
     recharged = after_trip[after_trip["ev_soc_percent"] >= EV_SOC_TARGET * 100.0 - 1e-6]
     pv_kwh, sell_kwh = kwh("pv_kw"), kwh("grid_sell_kw")
-    load_kwh = kwh("cooler_kw") + kwh("ev_kw")
+    load_kwh = kwh("cooler_kw") + kwh("other_load_kw") + kwh("ev_kw")
     return {
         "controller": controller,
         "start": results.index[0].date().isoformat(),
@@ -1106,6 +1120,7 @@ def summarize_week(results: pd.DataFrame, controller: str) -> dict:
         "pv_kwh": pv_kwh,
         "pv_used_on_site_kwh": pv_kwh - sell_kwh,
         "cooler_kwh": kwh("cooler_kw"),
+        "other_load_kwh": kwh("other_load_kw"),
         "cooler_unsafe_minutes": int(
             ((results["cooler_temp_f"] < TMIN) | (results["cooler_temp_f"] > TMAX)).sum()
         ),
@@ -1136,7 +1151,7 @@ def daily_totals(results: pd.DataFrame, controller: str) -> pd.DataFrame:
         battery_discharge_kw=-results["battery_kw"].clip(upper=0),
     )
     columns = [
-        "pv_kw", "pv_used_kw", "cooler_kw", "ev_kw", "battery_charge_kw",
+        "pv_kw", "pv_used_kw", "cooler_kw", "other_load_kw", "ev_kw", "battery_charge_kw",
         "battery_grid_charge_kw", "battery_discharge_kw", "grid_buy_kw",
         "grid_sell_kw", "grid_emissions_lb",
     ]
