@@ -360,16 +360,16 @@ class EMSController:
        
         if self.safety_mode == "too_hot":
             if temp_f > TMAX_RELEASE:
-                return 51.0
+                return TMAX_RELEASE
             self.safety_mode = None
-            return 51.0 
+            return TMAX_RELEASE 
 
     
         if self.safety_mode == "too_cold":
             if temp_f < TMIN_RELEASE:
-                return 40.0
+                return TMIN_RELEASE
             self.safety_mode = None
-            return 40.0
+            return TMIN_RELEASE
 
         if self.clean:
             requested_clean = (
