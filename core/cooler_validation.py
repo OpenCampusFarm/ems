@@ -1,7 +1,7 @@
 from matplotlib import pyplot as plt
 import pandas as pd
 
-from simulation import Cooler, ems_setpoint, synthetic_moer, PV
+from simulation import Cooler, EMSController, synthetic_moer, PV
 
 
 # --------------------------------------------------
@@ -378,6 +378,8 @@ cooler = Cooler(
     ci = 0.2
     
 )
+ems=EMSController()
+
 
 cooler.temp = 52.8
 
@@ -422,14 +424,10 @@ for step, timestamp in enumerate(simulation_times):
     pv_kw = pv.update(minute_of_day)
     moer = synthetic_moer(minute_of_day)
 
-    sp = ems_setpoint(
-        pv_kw,
-        moer,
-        cooler.temp,
-    )
-
+    sp = ems.setpoint(pv_kw, moer, cooler.temp)
     cooler.change_setpoint(sp)
     cooler.update(outdoor_f=float(outdoor_f))
+    
 
     sim_times.append(timestamp)
     sim_temps.append(cooler.temp)
