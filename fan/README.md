@@ -4,7 +4,8 @@ Controls a ventilation fan on a Raspberry Pi based on outdoor temperature and Co
 
 ## Hardware
 
-- DS18B20 1-Wire temperature sensor (outdoor, connected to the Pi)
+- Lascar EasyLog WiFi-TH logger (outdoor, read from EasyLog Cloud) — primary outdoor temperature
+- DS18B20 1-Wire temperature sensor (outdoor, connected to the Pi) — fallback; Open-Meteo forecast is the last fallback
 - Relay on GPIO23 (pin 16) controlling the fan
 - CoolBot AC controller communicating via Blynk WebSocket
 
@@ -40,6 +41,9 @@ cp .env.example .env
 ```ini
 SIT_EMAIL=your@email.com
 SIT_PASSWORD=yourpassword
+EASYLOG_EMAIL=your@email.com
+EASYLOG_PASSWORD=yourpassword
+EASYLOG_DEVICE=CampusFarm
 ```
 
 ## Running

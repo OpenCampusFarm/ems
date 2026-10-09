@@ -19,6 +19,7 @@ except ImportError:
 from dotenv import load_dotenv
 
 from coolbot import CoolBotClient
+from easylog import get_easylog_temp
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -55,7 +56,7 @@ def read_outdoor_temp() -> float | None:
         base_dir = "/sys/bus/w1/devices/"
         sensors = [f for f in os.listdir(base_dir) if f.startswith("28-")]
         if not sensors:
-            log.warning("[Sensor] No DS18B20 sensors found, falling back to Open-Meteo")
+            log.warning("[Sensor] No DS18B20 sensors found")
             return None
         device_file = f"{base_dir}{sensors[0]}/w1_slave"
         with open(device_file) as f:
@@ -94,7 +95,13 @@ def get_outdoor_temp_api() -> float | None:
 
 
 def get_outdoor_temp() -> float | None:
-    return read_outdoor_temp() or get_outdoor_temp_api()
+    # Priority: EasyLog WiFi logger -> DS18B20 on the Pi -> Open-Meteo forecast.
+    # Compare with None so a legitimate 0.0°F reading isn't treated as a failure.
+    for source in (get_easylog_temp, read_outdoor_temp, get_outdoor_temp_api):
+        temp = source()
+        if temp is not None:
+            return temp
+    return None
 
 
 # --- Fan relay ---
