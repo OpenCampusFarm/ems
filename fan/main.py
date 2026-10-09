@@ -2,6 +2,7 @@ import asyncio
 import enum
 import logging
 import os
+import signal
 from pathlib import Path
 
 import requests
@@ -189,14 +190,36 @@ async def control_loop():
         await asyncio.sleep(POLL_INTERVAL)
 
 
+def _install_shutdown_handlers(loop: asyncio.AbstractEventLoop, task: asyncio.Task):
+    # signal.signal (not loop.add_signal_handler) so this works on Windows too.
+    # SIGBREAK only exists on Windows (Ctrl-Break / console close).
+    def handler(_signum, _frame):
+        loop.call_soon_threadsafe(task.cancel)
+
+    for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            signal.signal(sig, handler)
+
+
+async def run():
+    # Any shutdown signal cancels the control loop so the CoolBot connection
+    # closes cleanly and main() can switch the relay off.
+    task = asyncio.create_task(control_loop())
+    _install_shutdown_handlers(asyncio.get_running_loop(), task)
+    try:
+        await task
+    except asyncio.CancelledError:
+        log.info("[Fan] Shutdown signal received")
+
+
 def main():
     log.info("[Fan] Starting up...")
     setup_gpio()
     try:
-        asyncio.run(control_loop())
-    except KeyboardInterrupt:
-        log.info("[Fan] Shutting down...")
+        asyncio.run(run())
     finally:
+        log.info("[Fan] Shutting down — fan OFF, releasing GPIO")
         set_fan(False)
         GPIO.cleanup()
 

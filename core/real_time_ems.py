@@ -13,6 +13,8 @@ Decision logic (every POLL_INTERVAL seconds):
 
 import logging
 import os
+import signal
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,7 +24,7 @@ from dotenv import load_dotenv
 
 from Loads.coolbot import change_setpoint, get_room_temp
 from Loads.openevse import get_status as get_ev_status
-from Loads.openevse import set_charging
+from Loads.openevse import release_claim, set_charging
 from egauge_client import EGaugeClient
 from solArk_inverter import get_inverter_data
 
@@ -254,15 +256,59 @@ def run_ems_cycle() -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
+_stop = threading.Event()
+
+
+def _handle_signal(signum, _frame) -> None:
+    if _stop.is_set():
+        raise KeyboardInterrupt  # second signal: stop waiting for the current cycle
+    log.info(
+        "[EMS] %s received — finishing current cycle, then shutting down "
+        "(signal again to force)",
+        signal.Signals(signum).name,
+    )
+    _stop.set()
+
+
+def _sleep_interruptible(seconds: float) -> None:
+    # Wait in short slices: on Windows a long Event.wait() isn't interrupted by
+    # Ctrl-C until it times out.
+    deadline = time.monotonic() + seconds
+    while not _stop.is_set() and (remaining := deadline - time.monotonic()) > 0:
+        _stop.wait(min(1.0, remaining))
+
+
+def shutdown() -> None:
+    """Hand EV control back to the charger so a stopped EMS never leaves it blocked."""
+    try:
+        release_claim()
+        log.info("[EV] Claim released")
+    except (requests.ConnectionError, requests.Timeout):
+        log.info("[EV] OpenEVSE not reachable — nothing to release")
+    except Exception as exc:
+        log.warning("[EV] Failed to release claim: %s", exc)
+
+
 def main() -> None:
+    # SIGBREAK only exists on Windows (Ctrl-Break / console close).
+    for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            signal.signal(sig, _handle_signal)
     log.info("[EMS] Starting up...")
     log.info("Campus Farm EMS starting — poll every %ds", POLL_INTERVAL)
-    while True:
-        try:
-            run_ems_cycle()
-        except KeyboardInterrupt:
-            log.info("EMS stopped by user.")
-            break
-        except Exception as exc:
-            log.error("Unexpected error: %s", exc, exc_info=True)
-        time.sleep(POLL_INTERVAL)
+    try:
+        while not _stop.is_set():
+            try:
+                run_ems_cycle()
+            except KeyboardInterrupt:
+                break
+            except Exception as exc:
+                log.error("Unexpected error: %s", exc, exc_info=True)
+            _sleep_interruptible(POLL_INTERVAL)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        log.info("[EMS] Shutting down...")
+        shutdown()
+        log.info("[EMS] Stopped")
