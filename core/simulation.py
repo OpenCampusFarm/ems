@@ -55,24 +55,7 @@ AMBIENT_TEMP     = 70.0   # °F — outside air temperature assumed constant
 TMIN             = 34.0   # °F — safety minimum (freeze prevention)
 TMAX             = 55.0   # °F — safety maximum (spoilage prevention)
 
-PV_CLEAN_ON_KW = 0.7
-PV_CLEAN_OFF_KW = 0.3
 
-MOER_CLEAN_ON = 1350
-MOER_CLEAN_OFF = 1450
-
-MIN_MODE_DWELL_MIN = 15
-
-SETPOINT_COOLTH = 37.0
-SETPOINT_ECON = 48.0
-
-TMIN = 34.0
-TMIN_ENTER = 35.0
-TMIN_RELEASE = 38.0
-
-TMAX = 55.0
-TMAX_ENTER = 54.0
-TMAX_RELEASE = 51.0
 
 # Pytes V5: 100Ah, 51.2V, 50A charge, 100A discharge (180A peak, unused)
 # SOC limits match the current Sol-Ark inverter settings; soc_init is a placeholder for the start of the day
@@ -340,56 +323,16 @@ class Battery:
 
 
 # ── EMS decision ──────────────────────────────────────────────────────────────
+def ems_setpoint(
+    pv_kw: float,
+    moer: float | None
+    ) -> float:
 
-class EMSController:
-    def __init__(self):
-        self.clean = False
-        self.safety_mode = None
-        self.minutes_since_change = MIN_MODE_DWELL_MIN
+    pv_producing = pv_kw >= PV_MIN_PRODUCING
+    grid_clean = moer is not None and moer < CO2_THRESHOLD
+    energy_clean = pv_producing or grid_clean
 
-    def setpoint(self, pv_kw: float, moer: float, temp_f: float) -> float:
-        self.minutes_since_change += 1
-
-        # Enter safety modes.
-        if self.safety_mode is None:
-            if temp_f >= TMAX_ENTER:
-                self.safety_mode = "too_hot"
-            elif temp_f <= TMIN_ENTER:
-                self.safety_mode = "too_cold"
-
-       
-        if self.safety_mode == "too_hot":
-            if temp_f > TMAX_RELEASE:
-                return TMAX_RELEASE
-            self.safety_mode = None
-            return TMAX_RELEASE 
-
-    
-        if self.safety_mode == "too_cold":
-            if temp_f < TMIN_RELEASE:
-                return TMIN_RELEASE
-            self.safety_mode = None
-            return TMIN_RELEASE
-
-        if self.clean:
-            requested_clean = (
-                pv_kw >= PV_CLEAN_OFF_KW
-                or moer < MOER_CLEAN_OFF
-            )
-        else:
-            requested_clean = (
-                pv_kw >= PV_CLEAN_ON_KW
-                or moer < MOER_CLEAN_ON
-            )
-
-        if (
-            requested_clean != self.clean
-            and self.minutes_since_change >= MIN_MODE_DWELL_MIN
-        ):
-            self.clean = requested_clean
-            self.minutes_since_change = 0
-
-        return SETPOINT_COOLTH if self.clean else SETPOINT_ECON
+    return SETPOINT_COOLTH if energy_clean else SETPOINT_ECON
 
 def _load_outdoor_temperatures(
     outdoor_csv_path: str | Path,
@@ -591,7 +534,6 @@ def run_day(inputs: pd.DataFrame, controller: str = "with-ems") -> pd.DataFrame:
         raise ValueError(f"controller must be one of {CONTROLLERS}")
 
     cooler = Cooler()
-    ems = EMSController()
     ev = EV()
     battery = Battery()
     cooler.ambient = float(inputs["outdoor_f"].iloc[0])
@@ -606,7 +548,7 @@ def run_day(inputs: pd.DataFrame, controller: str = "with-ems") -> pd.DataFrame:
         if controller == "without-ems":
             sp = SETPOINT_NO_EMS
         else:
-            sp = ems.setpoint(pv_kw, moer, cooler.temp)
+            sp = ems_setpoint(pv_kw, moer)
         cooler.change_setpoint(sp)
         cooler.update(outdoor_f=float(row["outdoor_f"]))
 
