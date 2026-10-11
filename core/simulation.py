@@ -92,6 +92,10 @@ BATT_TOU_SCHEDULE = (
 # TODO(team): grid charge rate is set in the Sol-Ark battery settings, not this screen;
 # the charge current limit (50 A) is assumed
 
+# The battery is only ever charged from excess PV, never from the grid, so the Charge
+# column above is ignored. Set to True to follow the inverter's Charge boxes instead.
+BATT_GRID_CHARGE = False
+
 # ── Charger and battery options ───────────────────────────────────────────────
 # Choose with --charger and --batteries; change CHARGER / BATT_MODULES to change the default.
 
@@ -102,10 +106,36 @@ BATT_TOU_SCHEDULE = (
 OPENEVSE_VOLTS = 240
 OPENEVSE_MIN_A = 6
 OPENEVSE_MAX_A = 48
+# 5 settings, like the old IQ 60: off and 25 / 50 / 75 / 100% of 48 A = 12, 24, 36, 48 A.
+OPENEVSE_5_AMPS = tuple(OPENEVSE_MAX_A * k // 4 for k in range(1, 5))
+# 5 settings starting at the OpenEVSE minimum: off and 4 levels evenly spaced from 6 A to
+# 48 A (14 A apart) = 6, 20, 34, 48 A. The lower first level lets the EV use small amounts
+# of solar and halves the clean-grid trickle.
+OPENEVSE_5_LOW_AMPS = tuple(
+    OPENEVSE_MIN_A + i * (OPENEVSE_MAX_A - OPENEVSE_MIN_A) // 3 for i in range(4)
+)
+# 9 charging levels (10 settings with off), evenly spaced from the minimum to the maximum
+# current and rounded to whole amps: 6, 11, 17, 22, 27, 32, 38, 43, 48 A.
+OPENEVSE_9_AMPS = tuple(
+    int(OPENEVSE_MIN_A + i * (OPENEVSE_MAX_A - OPENEVSE_MIN_A) / 8 + 0.5) for i in range(9)
+)
 
 CHARGERS = {
-    "openevse": {
-        "label": "OpenEVSE 48A",
+    "openevse-5": {
+        "label": "OpenEVSE 48A, 5 settings (off/12/24/36/48 A)",
+        "steps_kw": tuple(amps * OPENEVSE_VOLTS / 1000 for amps in OPENEVSE_5_AMPS),
+    },
+    "openevse-5-6a": {
+        "label": "OpenEVSE 48A, 5 settings (off/6/20/34/48 A)",
+        "steps_kw": tuple(amps * OPENEVSE_VOLTS / 1000 for amps in OPENEVSE_5_LOW_AMPS),
+    },
+    "openevse-9": {
+        "label": "OpenEVSE 48A, 9 levels (6–48 A)",
+        "steps_kw": tuple(amps * OPENEVSE_VOLTS / 1000 for amps in OPENEVSE_9_AMPS),
+    },
+    # same charger, one level per amp (6–48 A)
+    "openevse-every-amp": {
+        "label": "OpenEVSE 48A, every amp",
         "steps_kw": tuple(amps * OPENEVSE_VOLTS / 1000 for amps in range(OPENEVSE_MIN_A, OPENEVSE_MAX_A + 1)),
     },
     # Enphase IQ 60: 25 / 50 / 75 / 100% of 11.5 kW (the charger used through 10/4)
@@ -114,7 +144,18 @@ CHARGERS = {
         "steps_kw": tuple(level for level in CHARGER_POWER_LEVELS_KW if level > 0.0),
     },
 }
-CHARGER = "openevse"
+CHARGER = "openevse-5"
+
+# Battery-first priority: solar left after the cooler and other loads fills the battery
+# before it goes to the EV. Staged EMS only gives the EV what the battery can't take;
+# under every controller the EV draws any shortfall from the grid, never the battery.
+BATTERY_FIRST = False
+
+# Sol-Ark solar priority (manual p. 33, "Other" tab). "load-first": solar covers the cooler,
+# base load and EV, and only the rest charges the battery. "batt-first" (the inverter default):
+# solar charges the battery first and the loads take what is left, plus grid power.
+# The 9/13–9/26 inverter data behaves like batt-first.
+SOLAR_PRIORITY = "load-first"
 
 # Stacked Pytes V5 modules in parallel: capacity and the modules' current limits add up.
 # The Sol-Ark Time of Use discharge limit (2 kW) is an inverter setting and stays the same.
@@ -127,7 +168,10 @@ def charger_steps_kw() -> tuple[float, ...]:
 
 
 def site_label() -> str:
-    return f"{CHARGER}_{BATT_MODULES}batt"
+    grid = "gridcharge-on" if BATT_GRID_CHARGE else "gridcharge-off"
+    priority = "_battery-first" if BATTERY_FIRST else ""
+    priority += "_batt-first-solar" if SOLAR_PRIORITY == "batt-first" else ""
+    return f"{CHARGER}_{BATT_MODULES}batt_{grid}{priority}"
 
 
 # Week-long runs: the EV is plugged in all week except the Wednesday dining hall trip.
@@ -135,7 +179,7 @@ def site_label() -> str:
 EV_WEEK_SOC_INIT   = EV_SOC_TARGET
 EV_TRIP_WEEKDAY    = 2      # Wednesday (Monday = 0)
 EV_TRIP_START_HOUR = 9      # unplugged 9:00 AM
-EV_TRIP_END_HOUR   = 19     # plugged back in 7:00 PM
+EV_TRIP_END_HOUR   = 16     # plugged back in 4:00 PM (charging started 3:20 PM on 9/16, 4:00 PM on 9/23)
 EV_TRIP_RETURN_SOC = 0.20
 
 
@@ -342,6 +386,11 @@ class Battery:
         # power that moves the SOC by soc_delta (%) over one step
         return soc_delta / 100 * self.capacity_ah * self.nominal_voltage / 1000 / dt_hours
 
+    def charge_acceptance_kw(self, dt_hours: float = 1.0 / 60.0) -> float:
+        """How much charging power the battery can take this step (current limit, room to 100%)."""
+        headroom_kw = max(0.0, self._soc_to_kw(self.soc_max - self.soc, dt_hours))
+        return min(self.max_charge_power, headroom_kw)
+
     @staticmethod
     def tou_slot(hour: int) -> tuple[float, float, bool]:
         """(max discharge kW, Batt %, grid Charge) for the Time of Use slot containing hour."""
@@ -362,7 +411,8 @@ class Battery:
     ) -> tuple[float, float, float, float]:
         """Sol-Ark order: PV -> loads -> battery -> grid sell; deficit: battery -> grid.
 
-        PV serves the cooler and other loads before the EV. The battery covers the
+        PV serves the cooler and other loads first. Then the EV, then the battery;
+        with BATTERY_FIRST the battery comes before the EV. The battery covers the
         cooler and other loads but never the EV, and only within the Time of Use slot's
         discharge limit and Batt %. SOC stays within [soc_min, soc_max].
         Returns battery kW (charge + / discharge -), grid sell kW, grid buy kW,
@@ -370,26 +420,27 @@ class Battery:
         """
         max_discharge_kw, slot_soc, grid_charge = self.tou_slot(hour)
         site_kw = cooler_kw + other_kw
-        surplus_kw = pv_kw - site_kw - ev_kw
-
-        pv_charge = 0.0
+        site_surplus = pv_kw - site_kw
+        if SOLAR_PRIORITY == "batt-first":
+            pv_for_battery = max(0.0, pv_kw)  # battery before every load
+        else:
+            pv_for_battery = max(0.0, site_surplus if BATTERY_FIRST else site_surplus - ev_kw)
+        pv_charge = min(pv_for_battery, self.charge_acceptance_kw(dt_hours))
+        surplus_kw = site_surplus - ev_kw - pv_charge
         grid_sell = max(0.0, surplus_kw)
-        if surplus_kw > 0:
-            headroom_kw = max(0.0, self._soc_to_kw(self.soc_max - self.soc, dt_hours))
-            pv_charge = min(surplus_kw, self.max_charge_power, headroom_kw)
-            grid_sell = surplus_kw - pv_charge
 
-        # Charge checked: grid tops the battery up to the slot's Batt %
+        # Charge checked (and grid charging allowed): grid tops the battery up to the slot's Batt %
         grid_charge_kw = 0.0
-        if grid_charge:
+        if grid_charge and BATT_GRID_CHARGE:
             target_kw = max(0.0, self._soc_to_kw(slot_soc - self.soc, dt_hours) - pv_charge)
             grid_charge_kw = min(self.max_charge_power - pv_charge, target_kw)
         self.charge(pv_charge + grid_charge_kw, dt_hours)
 
-        # battery only covers the part of the cooler and other loads that PV doesn't
+        # battery only covers the part of the cooler and other loads that PV doesn't;
+        # any EV shortfall (including when PV went to the battery first) is from the grid
         grid_buy = max(0.0, -surplus_kw) + grid_charge_kw
         discharge_kw = 0.0
-        if surplus_kw < 0 and grid_charge_kw == 0.0:
+        if surplus_kw < 0 and grid_charge_kw == 0.0 and pv_charge == 0.0:
             site_deficit = max(0.0, site_kw - pv_kw)
             floor = max(self.soc_min, slot_soc)
             available_kw = max(0.0, self._soc_to_kw(self.soc - floor, dt_hours))
@@ -663,7 +714,10 @@ def run_day(
             elif controller == "with-ems":
                 ev_kw = ev.rate if energy_clean else 0.0
             else:
-                ev_kw = staged_charger_kw(pv_kw - cooler.instant_power_kw, moer_condition)
+                surplus_kw = pv_kw - cooler.instant_power_kw - OTHER_LOAD_KW
+                if BATTERY_FIRST or SOLAR_PRIORITY == "batt-first":
+                    surplus_kw -= battery.charge_acceptance_kw()
+                ev_kw = staged_charger_kw(surplus_kw, moer_condition)
             ev.charge(ev_kw) if ev_kw > 0.0 else ev.idle()
 
         # battery dispatch on this minute's loads; the battery never powers the EV
@@ -1180,7 +1234,10 @@ def run_week_scenario(
 
 
 def _print_week(label: str, summary: pd.DataFrame, filled_hours: float) -> None:
-    print(f"{label} (Sol-Ark PV + WattTime MOER, EV trip Wed 9:00–19:00)")
+    print(
+        f"{label} (Sol-Ark PV + WattTime MOER, EV trip Wed "
+        f"{EV_TRIP_START_HOUR}:00–{EV_TRIP_END_HOUR}:00)"
+    )
     if filled_hours:
         print(f"  note: {filled_hours:.1f} h of MOER filled from the week before")
     header = (
@@ -1304,6 +1361,15 @@ if __name__ == "__main__":
                         help="EV charger model (default: %(default)s)")
     parser.add_argument("--batteries", type=int, default=BATT_MODULES,
                         help="Number of stacked Pytes V5 modules (default: %(default)s)")
+    parser.add_argument("--grid-charge", choices=("on", "off"),
+                        default="on" if BATT_GRID_CHARGE else "off",
+                        help="on = Time of Use Charge checked (grid tops up the battery); "
+                             "off = battery charges from excess PV only (default: %(default)s)")
+    parser.add_argument("--solar-priority", choices=("load-first", "batt-first"), default=SOLAR_PRIORITY,
+                        help="Sol-Ark solar priority: cover loads first, or charge the battery first "
+                             "(default: %(default)s)")
+    parser.add_argument("--battery-first", action="store_true", default=BATTERY_FIRST,
+                        help="Excess PV fills the battery before the EV")
     parser.add_argument("--moer-csv", type=Path,
                         help="Week run: WattTime CSV with point_time (UTC) and value columns")
     parser.add_argument("--high-pv-xlsx", type=Path, help="Sol-Ark export for the High PV day")
@@ -1329,7 +1395,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
     CHARGER = args.charger
     BATT_MODULES = args.batteries
-    print(f"Charger: {CHARGERS[CHARGER]['label']} | Battery modules: {BATT_MODULES}")
+    BATT_GRID_CHARGE = args.grid_charge == "on"
+    BATTERY_FIRST = args.battery_first
+    SOLAR_PRIORITY = args.solar_priority
+    print(
+        f"Charger: {CHARGERS[CHARGER]['label']} | Battery modules: {BATT_MODULES} | "
+        f"TOU Charge: {'checked (grid allowed)' if BATT_GRID_CHARGE else 'unchecked (PV only)'} | "
+        f"Battery-first: {'yes' if BATTERY_FIRST else 'no'} | Solar priority: {SOLAR_PRIORITY}"
+    )
 
     if args.week_pv_xlsx:
         if args.moer_csv is None:
