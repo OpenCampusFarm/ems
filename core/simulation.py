@@ -421,8 +421,12 @@ class Battery:
         max_discharge_kw, slot_soc, grid_charge = self.tou_slot(hour)
         site_kw = cooler_kw + other_kw
         site_surplus = pv_kw - site_kw
-        if SOLAR_PRIORITY == "batt-first":
-            pv_for_battery = max(0.0, pv_kw)  # battery before every load
+        floor = max(self.soc_min, slot_soc)
+        can_discharge = max_discharge_kw > 0 and self.soc > floor + 1e-9
+        if SOLAR_PRIORITY == "batt-first" and not (can_discharge and pv_kw < site_kw):
+            # battery before every load, except when it may discharge and PV can't cover the
+            # loads (e.g. dusk): then PV goes to the loads and the battery covers the rest
+            pv_for_battery = max(0.0, pv_kw)
         else:
             pv_for_battery = max(0.0, site_surplus if BATTERY_FIRST else site_surplus - ev_kw)
         pv_charge = min(pv_for_battery, self.charge_acceptance_kw(dt_hours))
