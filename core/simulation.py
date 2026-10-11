@@ -55,24 +55,7 @@ AMBIENT_TEMP     = 70.0   # °F — outside air temperature assumed constant
 TMIN             = 34.0   # °F — safety minimum (freeze prevention)
 TMAX             = 55.0   # °F — safety maximum (spoilage prevention)
 
-PV_CLEAN_ON_KW = 0.7
-PV_CLEAN_OFF_KW = 0.3
 
-MOER_CLEAN_ON = 1350
-MOER_CLEAN_OFF = 1450
-
-MIN_MODE_DWELL_MIN = 15
-
-SETPOINT_COOLTH = 37.0
-SETPOINT_ECON = 48.0
-
-TMIN = 34.0
-TMIN_ENTER = 35.0
-TMIN_RELEASE = 38.0
-
-TMAX = 55.0
-TMAX_ENTER = 54.0
-TMAX_RELEASE = 51.0
 
 # Electricity, separate from the cooler's thermal model (Cooler.power_kw stays the
 # fitted cooling capacity). Estimated from the Sol-Ark load port, 9/13–9/26, with EV
@@ -108,6 +91,44 @@ BATT_TOU_SCHEDULE = (
 )
 # TODO(team): grid charge rate is set in the Sol-Ark battery settings, not this screen;
 # the charge current limit (50 A) is assumed
+
+# ── Charger and battery options ───────────────────────────────────────────────
+# Choose with --charger and --batteries; change CHARGER / BATT_MODULES to change the default.
+
+# OpenEVSE Advanced Series 48A (J1772). Charging current is set in whole amps from
+# the J1772 minimum (6 A) up to 48 A continuous, which needs a 60 A circuit.
+# TODO(team): confirm the breaker size (a 50 A circuit limits it to 40 A) and the
+# supply voltage (240 V split phase assumed; 208 V would lower every step)
+OPENEVSE_VOLTS = 240
+OPENEVSE_MIN_A = 6
+OPENEVSE_MAX_A = 48
+
+CHARGERS = {
+    "openevse": {
+        "label": "OpenEVSE 48A",
+        "steps_kw": tuple(amps * OPENEVSE_VOLTS / 1000 for amps in range(OPENEVSE_MIN_A, OPENEVSE_MAX_A + 1)),
+    },
+    # Enphase IQ 60: 25 / 50 / 75 / 100% of 11.5 kW (the charger used through 10/4)
+    "iq60": {
+        "label": "Enphase IQ 60",
+        "steps_kw": tuple(level for level in CHARGER_POWER_LEVELS_KW if level > 0.0),
+    },
+}
+CHARGER = "openevse"
+
+# Stacked Pytes V5 modules in parallel: capacity and the modules' current limits add up.
+# The Sol-Ark Time of Use discharge limit (2 kW) is an inverter setting and stays the same.
+# TODO(team): check the Sol-Ark battery charge/discharge amp settings after adding a module
+BATT_MODULES = 1
+
+
+def charger_steps_kw() -> tuple[float, ...]:
+    return CHARGERS[CHARGER]["steps_kw"]
+
+
+def site_label() -> str:
+    return f"{CHARGER}_{BATT_MODULES}batt"
+
 
 # Week-long runs: the EV is plugged in all week except the Wednesday dining hall trip.
 # It starts the week full and comes back from the trip at EV_TRIP_RETURN_SOC.
@@ -295,12 +316,15 @@ class Battery:
         soc_min: float                   = BATT_SOC_MIN,
         soc_max: float                   = BATT_SOC_MAX,
         soc_init: float                  = BATT_SOC_INIT,
+        modules: int                     = 1,
     ):
-        self.capacity_ah     = capacity_ah
+        # per-module ratings; parallel modules add capacity and current
+        self.modules         = modules
+        self.capacity_ah     = capacity_ah * modules
         self.nominal_voltage = nominal_voltage
-        self.max_charge_power     = charge_current_max * nominal_voltage / 1000         # kW
-        self.max_discharge_power  = discharge_current_nominal * nominal_voltage / 1000  # kW
-        self.peak_discharge_power = discharge_current_peak * nominal_voltage / 1000     # kW, not modeled yet
+        self.max_charge_power     = charge_current_max * modules * nominal_voltage / 1000         # kW
+        self.max_discharge_power  = discharge_current_nominal * modules * nominal_voltage / 1000  # kW
+        self.peak_discharge_power = discharge_current_peak * modules * nominal_voltage / 1000     # kW, not modeled yet
         self.soc_min = soc_min  # %
         self.soc_max = soc_max  # %
         self.soc     = soc_init  # %
@@ -378,56 +402,16 @@ class Battery:
 
 
 # ── EMS decision ──────────────────────────────────────────────────────────────
+def ems_setpoint(
+    pv_kw: float,
+    moer: float | None
+    ) -> float:
 
-class EMSController:
-    def __init__(self):
-        self.clean = False
-        self.safety_mode = None
-        self.minutes_since_change = MIN_MODE_DWELL_MIN
+    pv_producing = pv_kw >= PV_MIN_PRODUCING
+    grid_clean = moer is not None and moer < CO2_THRESHOLD
+    energy_clean = pv_producing or grid_clean
 
-    def setpoint(self, pv_kw: float, moer: float, temp_f: float) -> float:
-        self.minutes_since_change += 1
-
-        # Enter safety modes.
-        if self.safety_mode is None:
-            if temp_f >= TMAX_ENTER:
-                self.safety_mode = "too_hot"
-            elif temp_f <= TMIN_ENTER:
-                self.safety_mode = "too_cold"
-
-       
-        if self.safety_mode == "too_hot":
-            if temp_f > TMAX_RELEASE:
-                return 51.0
-            self.safety_mode = None
-            return 51.0 
-
-    
-        if self.safety_mode == "too_cold":
-            if temp_f < TMIN_RELEASE:
-                return 40.0
-            self.safety_mode = None
-            return 40.0
-
-        if self.clean:
-            requested_clean = (
-                pv_kw >= PV_CLEAN_OFF_KW
-                or moer < MOER_CLEAN_OFF
-            )
-        else:
-            requested_clean = (
-                pv_kw >= PV_CLEAN_ON_KW
-                or moer < MOER_CLEAN_ON
-            )
-
-        if (
-            requested_clean != self.clean
-            and self.minutes_since_change >= MIN_MODE_DWELL_MIN
-        ):
-            self.clean = requested_clean
-            self.minutes_since_change = 0
-
-        return SETPOINT_COOLTH if self.clean else SETPOINT_ECON
+    return SETPOINT_COOLTH if energy_clean else SETPOINT_ECON
 
 def _load_outdoor_temperatures(
     outdoor_csv_path: str | Path,
@@ -542,9 +526,9 @@ SCENARIOS = {
 def staged_charger_kw(surplus_kw: float, moer_condition: bool) -> float:
     """Highest charger step the PV surplus fully covers (rounded down).
 
-    Below the lowest step, trickle at 25% only when the grid is clean.
+    Below the lowest step, trickle at the lowest step only when the grid is clean.
     """
-    steps = [level for level in CHARGER_POWER_LEVELS_KW if level > 0.0]
+    steps = charger_steps_kw()
     covered = [level for level in steps if level <= surplus_kw]
     if covered:
         return max(covered)
@@ -637,9 +621,8 @@ def run_day(
         raise ValueError(f"controller must be one of {CONTROLLERS}")
 
     cooler = Cooler()
-    ems = EMSController()
-    ev = SimEV(soc_init=ev_soc_init)
-    battery = Battery(soc_init=battery_soc_init)
+    ev = SimEV(soc_init=ev_soc_init, charge_rate_kw=max(charger_steps_kw()))
+    battery = Battery(soc_init=battery_soc_init, modules=BATT_MODULES)
     cooler.ambient = float(inputs["outdoor_f"].iloc[0])
     trip_fraction = (
         inputs["ev_trip_fraction"] if "ev_trip_fraction" in inputs
@@ -657,7 +640,7 @@ def run_day(
         if controller == "without-ems":
             sp = SETPOINT_NO_EMS
         else:
-            sp = ems.setpoint(pv_kw, moer, cooler.temp)
+            sp = ems_setpoint(pv_kw, moer)
         cooler.change_setpoint(sp)
         cooler.update(outdoor_f=float(row["outdoor_f"]))
 
@@ -803,7 +786,7 @@ def run_scenario(
 ) -> pd.DataFrame:
     """Run one scenario over its sample days and controllers; save CSVs and a plot."""
     day_labels, controllers = SCENARIOS[scenario]
-    scenario_dir = output_dir / scenario
+    scenario_dir = output_dir / f"{scenario}_{site_label()}"
     scenario_dir.mkdir(parents=True, exist_ok=True)
 
     results_by_day: dict[str, dict[str, pd.DataFrame]] = {}
@@ -1170,7 +1153,7 @@ def run_week_scenario(
     show_plot: bool = False,
 ) -> pd.DataFrame:
     inputs = week_inputs(pv_xlsx, moer_csv, outdoor_csv)
-    label = f"week-{inputs.index[0].date().isoformat()}"
+    label = f"week-{inputs.index[0].date().isoformat()}_{site_label()}"
     week_dir = output_dir / label
     week_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1317,6 +1300,10 @@ if __name__ == "__main__":
                         help="Run a sample-day scenario instead of a single day")
     parser.add_argument("--week-pv-xlsx", type=Path,
                         help="Week run: Sol-Ark Operation Data export covering whole days (Sun–Sat)")
+    parser.add_argument("--charger", choices=tuple(CHARGERS), default=CHARGER,
+                        help="EV charger model (default: %(default)s)")
+    parser.add_argument("--batteries", type=int, default=BATT_MODULES,
+                        help="Number of stacked Pytes V5 modules (default: %(default)s)")
     parser.add_argument("--moer-csv", type=Path,
                         help="Week run: WattTime CSV with point_time (UTC) and value columns")
     parser.add_argument("--high-pv-xlsx", type=Path, help="Sol-Ark export for the High PV day")
@@ -1340,6 +1327,9 @@ if __name__ == "__main__":
                         default="core/Data/outdoor_temperatures.csv")
     parser.add_argument("--date", help="Simulation date (YYYY-MM-DD) when not using --pv-xlsx")
     args = parser.parse_args()
+    CHARGER = args.charger
+    BATT_MODULES = args.batteries
+    print(f"Charger: {CHARGERS[CHARGER]['label']} | Battery modules: {BATT_MODULES}")
 
     if args.week_pv_xlsx:
         if args.moer_csv is None:
