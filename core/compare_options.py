@@ -1,19 +1,21 @@
-"""Compare the four charger / battery / Time of Use options and draw slide charts.
+"""Compare the six charger / battery / solar priority options and draw slide charts.
 
-Runs every option (1–2 batteries × 12 A / 6 A lowest charger setting) for every strategy (No EMS / Binary / Staged) over both weeks and saves
-to results/integrated_simulation/compare_options/:
+Runs every option (12 A or 6 A lowest charger setting × 1–2 batteries, plus Load First vs
+Batt First) for every strategy (No EMS / Binary / Staged) over both weeks and saves to
+results/integrated_simulation/compare_options/ (or compare_options_tuned/ with --tuned):
 
   summary_all_options.csv     one row per week x option x strategy
   1_co2_heatmap.png           grid CO2 for every option and strategy (week of 9/20)
   2_path_to_best.png          step by step from today's setup to the best option
   3_grid_buy_breakdown.png    what the grid energy was used for
-  4_battery_two_nights.png    battery charge, Mon–Wed, with Charge checked vs unchecked
+  4_battery_two_nights.png    battery charge Mon–Wed, one vs two batteries
   5_co2_vs_ev_ready.png       grid CO2 vs how long the EV takes to recharge
 
 Usage:
-    python core/compare_options.py
+    python core/compare_options.py [--tuned]
 """
 
+import argparse
 import warnings
 from pathlib import Path
 
@@ -35,6 +37,7 @@ WEEKS = {
 }
 SLIDE_WEEK = "9/20"
 OUT = Path("results/integrated_simulation/compare_options")
+MODEL_NOTE = ""   # set with --tuned; shown under every chart
 
 # (option, charger, Time of Use Charge checked, battery modules, battery first)
 # (option, charger, Time of Use Charge checked, battery modules, battery first, solar priority)
@@ -83,7 +86,7 @@ def grid_breakdown(results: pd.DataFrame) -> dict:
     Solar that went into the battery isn't available to the loads, so this works for both
     Load First and Batt First.
     """
-    site = results["cooler_kw"] + results["other_load_kw"]
+    site = results["cooler_kw"] + results["other_load_kw"] + results["inverter_loss_kw"]  # losses: tuned model only
     discharge = (-results["battery_kw"]).clip(lower=0)
     battery_grid = results["battery_grid_charge_kw"]
     battery_from_pv = results["battery_kw"].clip(lower=0) - battery_grid
@@ -147,6 +150,8 @@ def new_figure(width: float, height: float, title: str, subtitle: str):
     fig = plt.figure(figsize=(width, height), facecolor=SURFACE)
     fig.text(0.01, 0.97, title, fontsize=15, fontweight="bold", color=TEXT, va="top")
     fig.text(0.01, 0.915, subtitle, fontsize=10.5, color=TEXT_2, va="top")
+    if MODEL_NOTE:
+        fig.text(0.01, 0.87, MODEL_NOTE, fontsize=9.5, color=TEXT_2, va="top", style="italic")
     return fig
 
 
@@ -307,6 +312,15 @@ def chart_co2_vs_ready(df: pd.DataFrame) -> None:
 
 
 def main() -> None:
+    global OUT, MODEL_NOTE
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--tuned", action="store_true",
+                        help="Tuned model (simulation.TUNED_SETTINGS); charts go to compare_options_tuned/")
+    args = parser.parse_args()
+    if args.tuned:
+        sim.use_tuned_model(True)
+        OUT = OUT.with_name("compare_options_tuned")
+        MODEL_NOTE = "Tuned model (inverter losses, battery efficiency, measured EV power, cooler vs outdoor temp)"
     OUT.mkdir(parents=True, exist_ok=True)
     df, soc_traces = run_all()
     df.to_csv(OUT / "summary_all_options.csv", index=False)

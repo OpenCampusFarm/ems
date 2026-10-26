@@ -1,18 +1,36 @@
-"""Compare the simulation with the real Sol-Ark inverter data, 9/13–9/26.
+"""Compare the simulation with the real Sol-Ark inverter data, week of 9/20–9/26.
 
 The simulation is set up the way the farm ran: No EMS (cooler fixed at 38 °F, EV charges as
 soon as it is plugged in), one battery, Batt First solar priority, no grid charging of the
-battery. The Wednesday trip is run two ways: as the model assumes (back at 4 PM at 20%) and
-matched to what the inverter recorded (plug-in time and energy).
+battery. The Wednesday EV charge starts when the inverter shows it starting and takes the
+energy the inverter recorded.
+
+Two versions of the model are compared with the real data:
+  original  the model as used in the option comparisons
+  tuned     plus the "match the real farm" adjustments fitted to the inverter data
+            (inverter losses, battery charging efficiency, measured EV draw, cooler power
+            rising with outdoor temperature). The loads are still calculated by the model
+            (cooler from outdoor temperature + flat wifi/electronics load), not taken from the data.
+
+The week of 9/13 is not plotted: the battery stopped at ~30% Sun–Wed that week (different
+inverter setting). It still goes into the inverter loss and battery efficiency fit.
 
 Saves to results/integrated_simulation/validation/:
-  daily_comparison.csv          real vs simulated daily totals (inverter counters)
-  V1_daily_real_vs_model.png    daily grid buy, grid sell, battery charge / discharge
-  V2_hourly_profile.png         average day, hour by hour (EV days excluded)
+  daily_comparison.csv              real vs original vs tuned daily totals
+  V1_daily_real_vs_model.png        daily grid buy, grid sell, battery charge / discharge
+  V2_hourly_profile.png             average day, hour by hour (EV day excluded)
+  V3_battery_soc_real_vs_model.png  battery charge Mon–Wed 9/21–9/23, same window as compare chart 4
+
+With --battery-powers-ev the tuned model also lets the battery cover the EV after 7 PM, like
+the real inverter did on the EV days (the team treats that as a mistake to fix at the farm),
+and the car slows its charging down near full, as measured on 9/16 and 9/23.
+Those charts go to results/integrated_simulation/validation/battery_powers_ev/.
 
 Usage:
-    python core/validate_model.py
+    python core/validate_model.py [--battery-powers-ev]
 """
+
+import argparse
 
 import warnings
 from pathlib import Path
@@ -27,16 +45,33 @@ import simulation as sim
 warnings.filterwarnings("ignore", category=UserWarning)
 
 OUT = Path("results/integrated_simulation/validation")
-REAL_TRIPS = {"9/13": (15 + 20 / 60, 88.6), "9/20": (16.0, 49.6)}  # plug-in hour, kWh charged
-REAL_COLOR, MODEL_COLOR, MATCHED_COLOR = co.TEXT_2, co.SERIES[0], co.SERIES[1]
+WEEK = "9/20"
+# EV charging seen on the inverter: start hour, kWh (load above the hour before it, summed)
+REAL_TRIPS = {"9/13": (15 + 20 / 60, 80.2), "9/20": (16.0, 43.6)}
+REAL_COLOR, ORIGINAL_COLOR, TUNED_COLOR = co.TEXT_2, co.NEUTRAL, co.SERIES[0]
+SOURCES = {"real": ("Real (inverter)", REAL_COLOR),
+           "original": ("Original model", ORIGINAL_COLOR),
+           "tuned": ("Tuned model", TUNED_COLOR)}
+
+# Only with --battery-powers-ev: the car slows down near full, so it is still charging after
+# 7 PM when the battery may discharge. Measured on 9/16 and 9/23: ~5.7 kWh over ~75–80 min.
+EV_TAPER_KWH = 5.7
+DEFAULTS = {name: getattr(sim, name) for name in ["BATT_POWERS_EV", "EV_TAPER_KWH"]}
 
 
-def configure_farm() -> None:
+def configure_farm(tuned: bool, battery_powers_ev: bool = False) -> None:
     sim.CHARGER = "openevse-5-6a"   # No EMS always charges at full power, so the levels don't matter
     sim.BATT_MODULES = 1
     sim.BATT_GRID_CHARGE = False
     sim.BATTERY_FIRST = False
     sim.SOLAR_PRIORITY = "batt-first"
+    for name, value in DEFAULTS.items():
+        setattr(sim, name, value)
+    sim.use_tuned_model(tuned)   # values and where they come from: simulation.TUNED_SETTINGS
+    if tuned:
+        sim.BATT_POWERS_EV = battery_powers_ev
+        if battery_powers_ev:
+            sim.EV_TAPER_KWH = EV_TAPER_KWH
 
 
 def load_real(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -61,8 +96,14 @@ def load_real(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
         "battery charging": (-battery).clip(lower=0) / 1000,
         "battery discharging": battery.clip(lower=0) / 1000,
         "load": num("LoadTotalPower(W)/178") / 1000,
+        "battery soc": num("BatteryEnergy(A·H)/184"),  # register 184 is the battery charge in %
     })
     return daily, power
+
+
+def normal_days(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop the EV charging day (Wed) and the day after, and any EV charging minutes."""
+    return df[(~df.index.weekday.isin([2, 3])) & (df["load"] < 3)]
 
 
 def model_daily(r: pd.DataFrame) -> pd.DataFrame:
@@ -72,8 +113,7 @@ def model_daily(r: pd.DataFrame) -> pd.DataFrame:
         "battery charge": r["battery_kw"].clip(lower=0), "battery discharge": (-r["battery_kw"]).clip(lower=0),
         "PV": r["pv_kw"],
     })
-    daily = per_minute.groupby(r.index.date).sum() / 60
-    return daily
+    return per_minute.groupby(r.index.date).sum() / 60
 
 
 def model_power(r: pd.DataFrame) -> pd.DataFrame:
@@ -82,15 +122,16 @@ def model_power(r: pd.DataFrame) -> pd.DataFrame:
         "battery charging": r["battery_kw"].clip(lower=0),
         "battery discharging": (-r["battery_kw"]).clip(lower=0),
         "load": r["cooler_kw"] + r["other_load_kw"] + r["ev_kw"],
+        "battery soc": r["battery_soc_percent"],
     }).set_axis(r.index.tz_localize(None))
 
 
-def run_model(week: str, matched: bool) -> pd.DataFrame:
+def run_model(week: str) -> pd.DataFrame:
+    """No EMS week with the EV plug-in time and energy matched to the inverter data."""
     saved = sim.EV_TRIP_END_HOUR, sim.EV_TRIP_RETURN_SOC
-    if matched:
-        end_hour, kwh = REAL_TRIPS[week]
-        sim.EV_TRIP_END_HOUR = end_hour
-        sim.EV_TRIP_RETURN_SOC = sim.EV_SOC_TARGET - kwh * sim.EV_CHARGE_EFF / sim.EV_CAPACITY
+    end_hour, kwh = REAL_TRIPS[week]
+    sim.EV_TRIP_END_HOUR = end_hour
+    sim.EV_TRIP_RETURN_SOC = sim.EV_SOC_TARGET - kwh * sim.EV_CHARGE_EFF / sim.EV_CAPACITY
     try:
         inputs = sim.week_inputs(co.WEEKS[week], co.MOER, co.OUTDOOR)
         return sim.run_week(inputs, "without-ems")
@@ -99,88 +140,123 @@ def run_model(week: str, matched: bool) -> pd.DataFrame:
 
 
 def main() -> None:
+    global OUT
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--battery-powers-ev", action="store_true",
+                        help="Tuned model: battery covers the EV after 7 PM, like the real inverter")
+    args = parser.parse_args()
+    if args.battery_powers_ev:
+        OUT = OUT / "battery_powers_ev"
+        SOURCES["tuned"] = ("Tuned model, battery powers EV + EV taper", TUNED_COLOR)
     OUT.mkdir(parents=True, exist_ok=True)
-    configure_farm()
-    tables, real_power, model_powers = [], [], []
-    for week, path in co.WEEKS.items():
-        real_daily, power = load_real(path)
-        real_power.append(power)
-        assumed = model_daily(run_model(week, matched=False))
-        matched_run = run_model(week, matched=True)
-        matched = model_daily(matched_run)
-        model_powers.append(model_power(matched_run))
-        table = pd.concat({"real": real_daily, "model (EV as assumed)": assumed,
-                           "model (EV matched)": matched}, axis=1)
-        table.insert(0, ("", "week"), week)
-        tables.append(table)
-    daily = pd.concat(tables)
+    real = {week: load_real(path) for week, path in co.WEEKS.items()}
+
+    runs = {}
+    for name in ("original", "tuned"):
+        configure_farm(tuned=name == "tuned", battery_powers_ev=args.battery_powers_ev)
+        runs[name] = run_model(WEEK)
+    configure_farm(tuned=False)
+
+    real_daily, real_power = real[WEEK]
+    daily = pd.concat({"real": real_daily, **{k: model_daily(r) for k, r in runs.items()}}, axis=1)
     daily.index = pd.to_datetime(daily.index)
+    daily = daily.sort_index()
     daily.round(2).to_csv(OUT / "daily_comparison.csv")
+    powers = {"real": real_power.sort_index(), **{k: model_power(r) for k, r in runs.items()}}
 
     # ── numbers ──
     metrics = ["grid buy", "grid sell", "load", "battery charge", "battery discharge", "PV"]
-    print("Weekly totals (kWh): real | model, EV as assumed | model, EV matched")
-    for week in co.WEEKS:
-        w = daily[daily[("", "week")] == week]
-        print(f"  week {week}")
-        for m in metrics:
-            real, a, b = (w[(src, m)].sum() for src in ("real", "model (EV as assumed)", "model (EV matched)"))
-            print(f"    {m:<18}{real:8.1f}{a:10.1f}{b:10.1f}   ({(b - real) / real * 100:+.0f}% matched)")
-    normal = daily[~daily.index.weekday.isin([2, 3])]  # no EV trip / recharge
-    print("\nNormal days (no EV): mean absolute daily error, model (EV matched) vs real")
+    print(f"Week of {WEEK}, weekly totals (kWh):   real  original     tuned"
+          + ("  (tuned: battery powers EV)" if args.battery_powers_ev else ""))
     for m in metrics:
-        err = (normal[("model (EV matched)", m)] - normal[("real", m)]).abs().mean()
-        print(f"    {m:<18}{err:5.2f} kWh/day  (real average {normal[('real', m)].mean():5.2f})")
+        r, a, b = (daily[(src, m)].sum() for src in SOURCES)
+        print(f"    {m:<18}{r:12.1f}{a:10.1f} ({(a - r) / r * 100:+3.0f}%){b:8.1f} ({(b - r) / r * 100:+3.0f}%)")
+    normal = daily[~daily.index.weekday.isin([2, 3])]
+    print("\nNormal days (no EV): mean absolute daily error (kWh/day)   original   tuned   real average")
+    for m in metrics:
+        err = lambda src: (normal[(src, m)] - normal[("real", m)]).abs().mean()
+        print(f"    {m:<18}{err('original'):39.2f}{err('tuned'):8.2f}{normal[('real', m)].mean():10.2f}")
+    print("\nBattery reaches 15% each night (first time):")
+    for day in pd.date_range(daily.index[0], daily.index[-1] - pd.Timedelta(days=1)):
+        times = []
+        for src in SOURCES:
+            soc = powers[src]["battery soc"][day + pd.Timedelta(hours=19):day + pd.Timedelta(hours=33)]
+            hit = soc[soc <= sim.BATT_SOC_MIN + 0.5]
+            times.append(hit.index[0].strftime("%a %-I:%M %p") if len(hit) else "—")
+        print(f"    night of {day:%a %-m/%-d}:  real {times[0]:<14} original {times[1]:<14} tuned {times[2]}")
 
     # ── V1: daily bars ──
-    panels = [("grid buy", "Grid buy"), ("grid sell", "Grid sell"),
+    panels = [("load", "Load"), ("grid buy", "Grid buy"), ("grid sell", "Grid sell"),
               ("battery charge", "Battery charged"), ("battery discharge", "Battery discharged")]
-    fig = co.new_figure(16, 10.5, "Model vs real inverter data, day by day (9/13–9/26)",
+    fig = co.new_figure(16, 12.5, f"Model vs real inverter data, day by day (week of {WEEK})",
                         "Farm settings: No EMS, 1 battery, Batt First, battery charged from solar only · "
-                        "real = Sol-Ark daily counters · EV trip matched to the real Wednesdays")
+                        "real = Sol-Ark daily counters · EV charging matched to the real Wednesday")
     x = np.arange(len(daily))
     labels = [d.strftime("%a\n%-m/%-d") for d in daily.index]
+    width = 0.27
     for i, (metric, title) in enumerate(panels):
-        ax = fig.add_axes([0.05, 0.7 - i * 0.205, 0.93, 0.15])
+        ax = fig.add_axes([0.05, 0.75 - i * 0.172, 0.93, 0.125])
         co.style(ax)
-        ax.bar(x - 0.2, daily[("real", metric)], 0.38, color=REAL_COLOR, label="Real (inverter)")
-        ax.bar(x + 0.2, daily[("model (EV matched)", metric)], 0.38, color=MODEL_COLOR, label="Model")
+        for j, (src, (label, color)) in enumerate(SOURCES.items()):
+            ax.bar(x + (j - 1) * width, daily[(src, metric)], width * 0.92, color=color, label=label)
         ax.set_title(title + " (kWh/day)", fontsize=11.5, color=co.TEXT, loc="left")
         ax.set_xticks(x, labels if i == len(panels) - 1 else [""] * len(x), fontsize=9)
-        if metric == "grid buy":
+        if metric in ("grid buy", "load"):
             ax.set_yscale("symlog", linthresh=10)
-            ax.set_yticks([0, 2, 5, 10, 50, 100], ["0", "2", "5", "10", "50", "100"])
+            ax.set_yticks([0, 2, 5, 10, 50], ["0", "2", "5", "10", "50"])
         if i == 0:
-            ax.legend(loc="upper right", frameon=False, fontsize=10, labelcolor=co.TEXT, ncol=2)
-    fig.text(0.05, 0.015, "Grid buy is on a stretched scale so the normal days (≈1–6 kWh) stay visible next to the "
-             "EV-charging Wednesdays (≈40–90 kWh).", fontsize=9, color=co.TEXT_2)
+            ax.legend(loc="upper right", frameon=False, fontsize=10, labelcolor=co.TEXT, ncol=3)
+    fig.text(0.05, 0.012, "Load and grid buy are on a stretched scale so the normal days stay visible next to the "
+             "EV-charging Wednesday (≈40–60 kWh). Load = cooler + wifi/electronics + EV, without inverter losses.",
+             fontsize=9, color=co.TEXT_2)
     fig.savefig(OUT / "V1_daily_real_vs_model.png", dpi=160, facecolor=co.SURFACE)
     plt.close(fig)
 
     # ── V2: average hourly profile on normal days ──
-    real_p = pd.concat(real_power)
-    model_p = pd.concat(model_powers)
-    keep = lambda df: df[(~df.index.weekday.isin([2, 3])) & (df["load"] < 3)]
-    real_h = keep(real_p).groupby(keep(real_p).index.hour).mean()
-    model_h = keep(model_p).groupby(keep(model_p).index.hour).mean()
-    rows = [("grid import", "Grid import"), ("grid export", "Grid export"),
+    hourly = {src: normal_days(p).groupby(normal_days(p).index.hour).mean() for src, p in powers.items()}
+    rows = [("load", "Load"), ("grid import", "Grid import"), ("grid export", "Grid export"),
             ("battery charging", "Battery charging"), ("battery discharging", "Battery discharging")]
-    fig = co.new_figure(16, 8, "Model vs real: an average normal day, hour by hour",
-                        "Average power (kW) for each hour over the 10 days without the EV trip or recharge "
+    fig = co.new_figure(16, 11, "Model vs real: an average normal day, hour by hour",
+                        f"Average power (kW) for each hour, week of {WEEK} without the EV day "
                         "(Wed/Thu excluded) · Farm settings: No EMS, 1 battery, Batt First")
     for i, (metric, title) in enumerate(rows):
-        ax = fig.add_axes([0.05 + (i % 2) * 0.48, 0.47 - (i // 2) * 0.4, 0.44, 0.3])
+        ax = fig.add_axes([0.05 + (i % 2) * 0.48, 0.62 - (i // 2) * 0.29, 0.44, 0.22])
         co.style(ax)
-        ax.plot(real_h.index, real_h[metric], color=REAL_COLOR, linewidth=2.5, marker="o", markersize=4,
-                label="Real (inverter)")
-        ax.plot(model_h.index, model_h[metric], color=MODEL_COLOR, linewidth=2, marker="o", markersize=4,
-                label="Model")
+        for src, (label, color) in SOURCES.items():
+            ax.plot(hourly[src].index, hourly[src][metric], color=color, linewidth=2.5 if src == "real" else 2,
+                    marker="o", markersize=4, label=label)
         ax.set_title(f"{title} (kW)", fontsize=11.5, color=co.TEXT, loc="left")
         ax.set_xticks(range(0, 24, 3), [pd.Timestamp(2026, 1, 1, h).strftime("%-I %p") for h in range(0, 24, 3)])
         ax.set_ylim(0, None)
         if i == 0:
-            ax.legend(loc="upper right", frameon=False, fontsize=10, labelcolor=co.TEXT)
+            ax.legend(loc="lower center", frameon=False, fontsize=10, labelcolor=co.TEXT, ncol=3)
     fig.savefig(OUT / "V2_hourly_profile.png", dpi=160, facecolor=co.SURFACE)
+    plt.close(fig)
+
+    # ── V3: battery charge, same window as compare_options chart 4 ──
+    # Mon–Wed like compare chart 4; with --battery-powers-ev through Thu morning to show the EV evening
+    start = pd.Timestamp("2026-09-21 00:00")
+    end = pd.Timestamp("2026-09-24 09:00" if args.battery_powers_ev else "2026-09-23 09:00")
+    fig = co.new_figure(13, 5.4, f"Battery charge Mon–{end:%a}: model vs real inverter data",
+                        "Farm settings: No EMS, 1 battery, Batt First · shaded = 9 AM–7 PM (battery held, no discharge)")
+    ax = fig.add_axes([0.06, 0.12, 0.92, 0.68])
+    co.style(ax)
+    ax.grid(True, axis="x", color=co.GRID, linewidth=0.5)
+    ax.set_xlim(start, end)
+    for day in pd.date_range(start.normalize(), end, freq="D"):
+        ax.axvspan(day + pd.Timedelta(hours=9), day + pd.Timedelta(hours=19), color=co.GRID, alpha=0.45, linewidth=0)
+    ax.axhline(sim.BATT_SOC_MIN, color=co.NEUTRAL, linewidth=1, linestyle="--")
+    ax.text(start + pd.Timedelta(hours=1), sim.BATT_SOC_MIN + 2, f"{sim.BATT_SOC_MIN}% minimum", fontsize=9, color=co.TEXT_2)
+    for src, (label, color) in SOURCES.items():
+        ax.plot(powers[src].index, powers[src]["battery soc"], color=color, linewidth=2.5 if src == "real" else 2,
+                label=label)
+    ax.set_ylabel("Battery charge (%)")
+    ax.set_ylim(0, 105)
+    ticks = pd.date_range(start, end, freq="6h")
+    ax.set_xticks(ticks, [t.strftime("%a %-I %p") for t in ticks], fontsize=9)
+    ax.legend(loc="lower center", ncol=3, frameon=True, facecolor=co.SURFACE, edgecolor=co.GRID,
+              fontsize=9.5, labelcolor=co.TEXT)
+    fig.savefig(OUT / "V3_battery_soc_real_vs_model.png", dpi=160, facecolor=co.SURFACE)
     plt.close(fig)
     print(f"\nSaved to {OUT.resolve()}")
 
