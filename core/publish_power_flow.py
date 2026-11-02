@@ -34,6 +34,16 @@ EMS_API_TOKEN = os.getenv("EMS_API_TOKEN", "")  # must match ems_api_token on th
 PUBLISH_INTERVAL = int(os.getenv("POWER_PUBLISH_INTERVAL", "60"))  # seconds
 
 
+def signed_grid_watts(flow: dict) -> float:
+    """Positive when selling, negative when buying.
+
+    SolArk's grid power can be positive while buying, so direction comes from
+    its gridTo flag.
+    """
+    watts = abs(flow["grid"])
+    return -watts if flow["grid_buying"] else watts
+
+
 def publish_power_flow() -> bool:
     """Fetch current PV/grid/load power from SolArk and POST it to Drupal."""
     flow = fetch_plant_data()
@@ -41,9 +51,10 @@ def publish_power_flow() -> bool:
         log.warning("[SolArk] No flow data available — skipping publish")
         return False
 
+    grid_w = signed_grid_watts(flow)
     payload = {
         "netSolartoInverter": flow["pv"],
-        "netInvertertoGrid": flow["grid"],
+        "netInvertertoGrid": grid_w,
         "netInvertertoComps": flow["load"],
     }
 
@@ -61,7 +72,7 @@ def publish_power_flow() -> bool:
         if response.status_code == 201:
             log.info(
                 "[Publish] solar=%.0fW grid=%.0fW load=%.0fW -> %s",
-                flow["pv"], flow["grid"], flow["load"], DRUPAL_DATA_ENDPOINT,
+                flow["pv"], grid_w, flow["load"], DRUPAL_DATA_ENDPOINT,
             )
             return True
         log.error("[Publish] Drupal returned %s: %s", response.status_code, response.text)

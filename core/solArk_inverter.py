@@ -59,10 +59,11 @@ def parse_flow_data(flow_response: dict[str, Any]) -> dict[str, float]:
             "grid":    float(data.get("gridOrMeterPower", 0)),
             "load":    float(data.get("loadOrEpsPower", 0)),
             "soc":     float(data.get("soc", 0)),
+            "grid_buying": bool(data.get("gridTo", False)),
         }
     except Exception as e:
         print(f"[ERROR] Failed to parse flow data: {e}")
-        return {"pv": 0, "battery": 0, "grid": 0, "load": 0, "soc": 0}
+        return {"pv": 0, "battery": 0, "grid": 0, "load": 0, "soc": 0, "grid_buying": False}
 
 
 def fetch_plant_data() -> dict[str, float] | None:
