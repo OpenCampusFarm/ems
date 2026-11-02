@@ -5,12 +5,20 @@ Decision logic (every POLL_INTERVAL seconds):
   1. Read SolArk inverter: PV watts, grid watts
   2. Read WattTime grid MOER (lbs CO2/MWh)
   3. "Clean" if PV is producing (>= PV_MIN_WATTS) OR grid MOER < CO2_CLEAN_THRESHOLD
-  4. If clean  → CoolBot setpoint = SETPOINT_COOLTH, start EV charging (if SOC < target)
-     If dirty  → CoolBot setpoint = SETPOINT_ECON,   stop  EV charging
+  4. If clean  → CoolBot setpoint = SETPOINT_COOLTH
+     If dirty  → CoolBot setpoint = SETPOINT_ECON
+  5. EV charging (EV_MODE) only uses excess PV, never grid or night charging, on any day.
+     The truck needs little energy and stops by itself when full.
+       binary: charge at EV_CHARGE_AMPS while excess PV covers it, otherwise block
+       staged: charge at the highest of EV_STAGED_AMPS that excess PV covers, otherwise block
+  EV charging is controlled on the OpenEVSE charger via an EVSE claim (soft control),
+  so the charger's LCD manual override still wins.
 """
 
 import logging
 import os
+import signal
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,7 +27,9 @@ import requests
 from dotenv import load_dotenv
 
 from Loads.coolbot import change_setpoint, get_room_temp
-from Loads.ev_battery import HA_TOKEN, HA_URI, HA_VIN, check_battery, set_charging
+from Loads.openevse import get_status as get_ev_status
+from Loads.openevse import release_claim, set_charging
+from egauge_client import EGaugeClient
 from solArk_inverter import get_inverter_data
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -50,8 +60,14 @@ SETPOINT_COOLTH = 45  # °F — low setpoint (clean energy)
 SETPOINT_ECON = 50  # °F — high setpoint (dirty energy)
 SETPOINT_DEFAULT = 48  # °F — neutral fallback
 
-# ── EV ────────────────────────────────────────────────────────────────────────
-EV_SOC_TARGET = 85  # %
+# ── EV charging ───────────────────────────────────────────────────────────────
+EV_MODE = (os.getenv("EV_MODE") or "binary").lower()  # "binary" or "staged"
+if EV_MODE not in ("binary", "staged"):
+    raise ValueError(f"EV_MODE must be binary or staged, not {EV_MODE!r}")
+
+EV_CHARGER_VOLTS = 240
+EV_CHARGE_AMPS = 12  # A, binary — chosen in core/binary_charge_speed.py
+EV_STAGED_AMPS = (6, 20, 34, 48)  # A, staged — simulation.py charger "openevse-5-6a"
 
 # ── Polling ───────────────────────────────────────────────────────────────────
 POLL_INTERVAL = 300  # seconds
@@ -146,9 +162,43 @@ def get_power_data() -> dict | None:
     }
 
 
+# ── eGauge meter (measurement only) ───────────────────────────────────────────
+
+_egauge: EGaugeClient | None = None
+
+
+def get_egauge_data() -> dict | None:
+    global _egauge
+    if _egauge is None:
+        _egauge = EGaugeClient()
+    raw = _egauge.get_all_values()
+    # Grid: negative = exporting. CT polarity makes the load readings negative,
+    # so report them as positive consumption.
+    return {
+        "grid": float(raw["grid_power"]),
+        "cooler": abs(float(raw["cooler_power"])),
+        "ev": abs(float(raw["evcharger_power"])),
+    }
+
+
 # ── EMS decision ─────────────────────────────────────────────────────────────
 
 _current_setpoint: int = SETPOINT_DEFAULT
+
+
+def excess_pv_watts(pv_w: float, load_w: float, ev_w: float) -> float:
+    """PV left after site loads. The Sol-Ark load includes the EV, so take the EV back out
+    or charging would count against itself and switch the charger off."""
+    site_load_w = max(load_w - ev_w, 0.0)
+    return pv_w - site_load_w
+
+
+def choose_ev_amps(excess_w: float) -> int:
+    """Charging current for this cycle, 0 to block. A level is only used if excess PV
+    covers its full power (amps × volts), so the truck never needs the grid."""
+    levels = (EV_CHARGE_AMPS,) if EV_MODE == "binary" else EV_STAGED_AMPS
+    covered = [amps for amps in levels if amps * EV_CHARGER_VOLTS <= excess_w]
+    return max(covered, default=0)
 
 
 def run_ems_cycle() -> None:
@@ -161,23 +211,39 @@ def run_ems_cycle() -> None:
 
     moer = get_grid_moer()
     room_temp = _retry(get_room_temp, retries=2, label="CoolBot room temp")
-    ev_data = _retry(check_battery, retries=3, label="Ford EV")
-    ev_soc = ev_data["percentage"] if ev_data else None
+    # Local-network device: no retries, the next cycle tries again.
+    ev_data = get_ev_status()
+    egauge = _retry(get_egauge_data, retries=2, label="eGauge")
 
     pv_w = power["pv"]
     grid_w = power["grid"]
     load_w = power["load"]
 
     log.info(
-        "[EMS] %s | PV=%.0fW  Grid=%.0fW  Load=%.0fW  MOER=%s  Room=%s  EV=%s",
+        "[EMS] %s | PV=%.0fW  Grid=%.0fW  Load=%.0fW  MOER=%s  Room=%s",
         datetime.now().strftime("%H:%M:%S"),
         pv_w,
         grid_w,
         load_w,
         f"{moer:.0f}" if moer is not None else "N/A",
         f"{room_temp:.1f}°F" if room_temp is not None else "N/A",
-        f"{ev_soc}%" if ev_soc is not None else "N/A",
     )
+    if egauge is not None:
+        log.info(
+            "[eGauge] Grid=%.0fW (neg=export)  Cooler=%.0fW  EV=%.0fW",
+            egauge["grid"],
+            egauge["cooler"],
+            egauge["ev"],
+        )
+    else:
+        log.warning("[eGauge] unavailable — measurement skipped")
+    if ev_data is not None:
+        log.info(
+            "[EV] state=%s connected=%s power=%.0fW",
+            ev_data["state"],
+            ev_data["connected"],
+            ev_data["power_w"],
+        )
 
     pv_producing = pv_w >= PV_MIN_WATTS
     grid_clean = moer is not None and moer < CO2_CLEAN_THRESHOLD
@@ -201,41 +267,80 @@ def run_ems_cycle() -> None:
     else:
         log.info("[CoolBot] Setpoint unchanged at %d°F", _current_setpoint)
 
-    if ev_soc is None:
-        log.warning("[EV] SOC unknown — skipping charging decision")
+    if ev_data is None:
+        log.info("[EV] OpenEVSE unavailable — skipping charging decision")
         return
 
-    if energy_clean and ev_soc < EV_SOC_TARGET:
-        try:
-            set_charging(True, HA_URI, HA_TOKEN, HA_VIN)
-            log.info("[EV] Charging ON (SOC=%d%%)", ev_soc)
-        except Exception as exc:
-            log.error("[EV] set_charging(True) failed: %s", exc)
-    else:
-        try:
-            set_charging(False, HA_URI, HA_TOKEN, HA_VIN)
-            reason = (
-                "dirty energy"
-                if not energy_clean
-                else f"SOC {ev_soc}% >= target {EV_SOC_TARGET}%"
-            )
-            log.info("[EV] Charging OFF (%s)", reason)
-        except Exception as exc:
-            log.error("[EV] set_charging(False) failed: %s", exc)
+    excess_w = excess_pv_watts(pv_w, load_w, ev_data["power_w"])
+    ev_amps = choose_ev_amps(excess_w)
+    charge_ev = ev_amps > 0
+
+    try:
+        set_charging(charge_ev, ev_amps)
+        if charge_ev:
+            log.info("[EV] %s: charging at %d A (excess PV %.0fW)", EV_MODE, ev_amps, excess_w)
+        else:
+            log.info("[EV] %s: charging blocked (excess PV %.0fW)", EV_MODE, excess_w)
+    except Exception as exc:
+        log.error("[EV] set_charging(%s, %d) failed: %s", charge_ev, ev_amps, exc)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
+_stop = threading.Event()
+
+
+def _handle_signal(signum, _frame) -> None:
+    if _stop.is_set():
+        raise KeyboardInterrupt  # second signal: stop waiting for the current cycle
+    log.info(
+        "[EMS] %s received — finishing current cycle, then shutting down "
+        "(signal again to force)",
+        signal.Signals(signum).name,
+    )
+    _stop.set()
+
+
+def _sleep_interruptible(seconds: float) -> None:
+    # Wait in short slices: on Windows a long Event.wait() isn't interrupted by
+    # Ctrl-C until it times out.
+    deadline = time.monotonic() + seconds
+    while not _stop.is_set() and (remaining := deadline - time.monotonic()) > 0:
+        _stop.wait(min(1.0, remaining))
+
+
+def shutdown() -> None:
+    """Hand EV control back to the charger so a stopped EMS never leaves it blocked."""
+    try:
+        release_claim()
+        log.info("[EV] Claim released")
+    except (requests.ConnectionError, requests.Timeout):
+        log.info("[EV] OpenEVSE not reachable — nothing to release")
+    except Exception as exc:
+        log.warning("[EV] Failed to release claim: %s", exc)
+
+
 def main() -> None:
+    # SIGBREAK only exists on Windows (Ctrl-Break / console close).
+    for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is not None:
+            signal.signal(sig, _handle_signal)
     log.info("[EMS] Starting up...")
     log.info("Campus Farm EMS starting — poll every %ds", POLL_INTERVAL)
-    while True:
-        try:
-            run_ems_cycle()
-        except KeyboardInterrupt:
-            log.info("EMS stopped by user.")
-            break
-        except Exception as exc:
-            log.error("Unexpected error: %s", exc, exc_info=True)
-        time.sleep(POLL_INTERVAL)
+    try:
+        while not _stop.is_set():
+            try:
+                run_ems_cycle()
+            except KeyboardInterrupt:
+                break
+            except Exception as exc:
+                log.error("Unexpected error: %s", exc, exc_info=True)
+            _sleep_interruptible(POLL_INTERVAL)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        log.info("[EMS] Shutting down...")
+        shutdown()
+        log.info("[EMS] Stopped")
