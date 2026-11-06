@@ -1,7 +1,56 @@
+from pathlib import Path
+
 from matplotlib import pyplot as plt
+import numpy as np
 import pandas as pd
 
-from simulation import Cooler, ems_setpoint, synthetic_moer, PV
+from simulation import Cooler, ems_setpoint
+
+# Sine-wave PV and made-up MOER, moved here from simulation.py (it now only runs real weeks)
+PV_MAX_POWER = 13.2   # kW
+
+
+def synthetic_moer(minute: int) -> float:
+    hour = (minute // 60) % 24
+    peak = 800.0 * np.sin(np.pi * max(0.0, hour - 7) / 14.0) ** 2
+    return 800.0 + peak
+
+
+class PV:
+    def __init__(
+        self,
+        inv_eff: float = 0.96,
+        max_power: float = PV_MAX_POWER,
+        csv_path: str | None = None,
+    ):
+        self.inv_eff   = inv_eff
+        self.max_power = max_power
+        self.power_kw  = 0.0
+        self._data: pd.DataFrame | None = None
+
+        if csv_path and Path(csv_path).exists():
+            self._data = pd.read_csv(csv_path, usecols=["Minute", "Power"])
+            print(f"[PV] Using CSV data from {csv_path}")
+        else:
+            print("[PV] Using sine-wave approximation (07:00–18:30 daylight window)")
+
+    def update(self, minute: int) -> float:
+        if self._data is not None:
+            idx = min(minute, len(self._data) - 1)
+            self.power_kw = float(self._data.at[idx, "Power"])
+        else:
+            daylight_start = 7 * 60
+            daylight_end   = 18 * 60 + 30
+            duration       = daylight_end - daylight_start
+            t = minute - daylight_start
+            if 0 <= t <= duration:
+                self.power_kw = (self.inv_eff * self.max_power / 2.0) * (
+                    np.sin(np.pi * t / duration) + 1.0
+                )
+            else:
+                self.power_kw = 0.0
+        return self.power_kw
+
 
 
 # --------------------------------------------------
@@ -371,9 +420,8 @@ outdoor_by_minute = (
     .interpolate(method="time")
 )
 cooler = Cooler(
-    ambient_f=float(outdoor_by_minute.iloc[0]),
+    outdoor_f=float(outdoor_by_minute.iloc[0]),
     setpoint_f=SETPOINT,
-    ri=3.0,
     cop = 2,
     ci = 0.2)
 
@@ -423,7 +471,7 @@ for step, timestamp in enumerate(simulation_times):
 
     sp = ems_setpoint(pv_kw, moer)
     cooler.change_setpoint(sp)
-    cooler.update(outdoor_f=float(outdoor_f))
+    cooler.update(float(outdoor_f))
     
 
     sim_times.append(timestamp)

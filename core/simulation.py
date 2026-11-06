@@ -1,23 +1,28 @@
 """
-Campus Farm EMS — one-day simulation.
+Campus Farm EMS simulation: No EMS vs Binary EMS vs Staged EMS, one week.
 
-Runs 1 440 minutes (one full day) through a physics-based model:
-  - PV     : Sol-Ark export (with WattTime MOER) if given, else CSV, else sine wave
+Farm setup (decided): inverter on Load First, one battery charged from excess solar only,
+OpenEVSE charger. Values marked "tuned" were fitted to the Sol-Ark data 9/13–9/26.
+
+  - PV     : Sol-Ark export, one minute at a time
+  - Grid   : WattTime MOER (grid CO2)
   - Cooler : first-order RC thermal model with bang-bang thermostat
-  - EV     : SoC integrator from ev_real_data_simulation
-  - Battery: stationary Sol-Ark battery (Pytes V5), dispatched on PV surplus/deficit
-  - Grid   : WattTime MOER with a Sol-Ark export, otherwise a synthetic duck curve
+  - EV     : the farm truck
+  - Battery: stationary Sol-Ark battery (Pytes V5)
 
-EMS decision each minute:
-  - "Clean" if PV >= PV_MIN_PRODUCING kW  OR  synthetic MOER < CO2_THRESHOLD
-  - Clean  → CoolBot setpoint = SETPOINT_COOLTH (35 °F), charge EV
-  - Dirty  → CoolBot setpoint = SETPOINT_ECON   (48 °F), don't charge EV
-  - Safety: TMIN/TMAX overrides applied before the normal clean/dirty choice
+Truck: charge limit EV_SOC_TARGET (80%), deliveries Tuesday and Thursday 9 AM–4 PM using
+10% each, plugged in the rest of the week.
 
-Usage:
-    python core/simulation.py                          # sine-wave PV
-    python core/simulation.py --csv PVdata.csv         # real PV data
-    python core/simulation.py --pv-xlsx solark.xlsx    # Sol-Ark PV + WattTime MOER
+Truck charging, decided every DECISION_MINUTES like the real EMS, from excess solar only:
+  - No EMS : full power whenever below the limit
+  - Binary : BINARY_AMPS (12 A = 2.88 kW) while excess solar covers it
+  - Staged : highest of STAGED_AMPS (6/20/34/48 A) that excess solar covers
+
+Usage (from the repo folder):
+    python core/simulation.py                              # week of 9/20
+    python core/simulation.py --week-pv-xlsx <Sol-Ark week export> --outdoor-csv <temps>
+    python core/simulation.py --battery-first              # battery fills before the truck
+Outputs: results/integrated_simulation/week-<start date>/
 """
 
 import argparse
@@ -27,357 +32,184 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from ev_real_data_simulation import (
-    CHARGER_POWER_LEVELS_KW,
-    EV,
-    SAMPLE_DAY_LABELS,
-    SCENARIO_EXPECTED_DATES,
-    get_watttime_token,
-    load_solark_pv,
-    real_inputs,
-)
+from ev_real_data_simulation import EV
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-SETPOINT_COOLTH  = 35     # °F — low setpoint (clean energy available)
-SETPOINT_ECON    = 48     # °F — high setpoint (dirty / no renewable energy)
+# SOC = state of charge (how full a battery is). MOER = grid CO2 per MWh right now (WattTime).
+SETPOINT_COOLTH  = 45     # °F — low setpoint (clean energy available), real_time_ems.py
+SETPOINT_ECON    = 50     # °F — high setpoint (dirty / no renewable energy), real_time_ems.py
+SETPOINT_NO_EMS  = 38     # °F — No EMS: the real CoolBot's fixed setpoint
 EV_CAPACITY      = 131.0  # kWh  (F-150 Lightning extended range)
-EV_CHARGE_RATE   = 11.5   # kW
-EV_CHARGE_EFF    = 0.90
-EV_MAX_MILES     = 240    # miles (used for display only)
-EV_SOC_INIT      = 0.20   # starting state of charge
-EV_SOC_TARGET    = 0.95
+EV_CHARGE_EFF    = 0.90   # 90% of wall energy ends up in the truck battery
+EV_SOC_TARGET    = 0.80   # truck charge limit
+EV_RESUME_MARGIN = 0.01   # once at the limit, charging restarts only this far below it
+DECISION_MINUTES = 5      # the EMS decides truck charging this often (real_time_ems.py POLL_INTERVAL)
 
-PV_MAX_POWER     = 13.2   # kW
 PV_MIN_PRODUCING = 0.5    # kW — threshold to count PV as "producing"
-CO2_THRESHOLD    = 1400   # lbs CO2/MWh — synthetic grid cleanliness threshold
+CO2_THRESHOLD    = 1400   # lbs CO2/MWh — grid cleanliness threshold
 
-AMBIENT_TEMP     = 70.0   # °F — outside air temperature assumed constant
-TMIN             = 34.0   # °F — safety minimum (freeze prevention)
+OUTDOOR_TEMP     = 70.0   # °F — starting outdoor temp; real hourly data replaces it
+TMIN             = 40.0   # °F — safety minimum
 TMAX             = 55.0   # °F — safety maximum (spoilage prevention)
 
-
-
-# Electricity, separate from the cooler's thermal model (Cooler.power_kw stays the
-# fitted cooling capacity). Estimated from the Sol-Ark load port, 9/13–9/26, with EV
-# charging (> 3 kW) removed: ~250 W constant base load (night minimum) and ~5.7 kWh/day
-# above it, taken as the cooler. COOLER_ELECTRIC_KW is set so the No EMS cooler (fixed
-# 38 °F, like the real CoolBot) uses that much over the same two weeks.
-COOLER_ELECTRIC_KW = 0.24   # kW while the cooler is running (at COOLER_ELECTRIC_REF_F outdoors)
-# The AC works harder the warmer it is outside: electricity while running changes by
-# COOLER_ELECTRIC_KW_PER_F per °F of outdoor temperature (0 = flat). Real ≈ 0.0165 kW/°F
-# with 0.207 kW at 60 °F, which reaches 0 at ~47.5 °F, about the real room temperature.
-COOLER_ELECTRIC_KW_PER_F = 0.0
-COOLER_ELECTRIC_REF_F    = 60.0
+# Cooler electricity while on = COOLER_ELECTRIC_KW + COOLER_ELECTRIC_KW_PER_F × (outdoor − 60 °F).
+COOLER_ELECTRIC_KW       = 0.207    # kW at 60 °F outdoors (tuned)
+COOLER_ELECTRIC_KW_PER_F = 0.0165   # kW more per °F warmer outside (tuned)
+COOLER_ELECTRIC_REF_F    = 60.0     # °F, reference outdoor temp for the line above
 OTHER_LOAD_KW      = 0.25   # kW, wifi/electronics room and controllers on the load port, always on (lights off)
 
-# "Match the real farm" adjustments, fitted to the Sol-Ark data 9/13–9/26 (non-EV days).
-# All off by default so the option comparisons are unchanged; validate_model.py turns them on.
-INVERTER_STANDBY_KW     = 0.0   # inverter self-use at night (real ≈ 0.07 kW)
-INVERTER_STANDBY_DAY_KW = 0.0   # inverter self-use while PV is producing (real ≈ 0.15 kW)
-INVERTER_PV_LOSS        = 0.0   # fraction of PV lost in conversion (real ≈ 0.015)
-PV_STANDBY_THRESHOLD_KW = 0.05
-EV_CHARGER_KW        = None   # EV draw at full power (inverter and eGauge ≈ 11.28 kW); None = charger maximum
-# Near full the car slows its charging down. Over the last EV_TAPER_KWH (from the wall) before the
-# target, power falls in proportion to the energy still needed, down to EV_TAPER_END_KW, then
-# stops at the target. Real (9/16 and 9/23): ~5.7 kWh over ~75–80 min, 11.4 → 1.7 kW. 0 = off.
-EV_TAPER_KWH    = 0.0
-EV_TAPER_END_KW = 1.7
+# Fan (placeholder until the fan team adds its temperature equation, see Cooler._fan_cooling_kw)
+FAN_INSTALLED   = False   # True = Binary/Staged use the fan rules in Cooler.update
+FAN_ELECTRIC_KW = 0.0     # TODO(team): fan power draw
 
-# Pytes V5: 100Ah, 51.2V, 50A charge, 100A discharge (180A peak, unused)
-# SOC limits match the current Sol-Ark inverter settings; soc_init is a placeholder for the start of the day
-# TODO(team): seed soc_init from the previous day's ending SOC (night->day->night convergence)
+# Inverter losses (tuned from the Sol-Ark daily counters)
+INVERTER_STANDBY_KW     = 0.070   # kW, inverter self-use at night (tuned)
+INVERTER_STANDBY_DAY_KW = 0.149   # kW, inverter self-use while PV is producing (tuned)
+INVERTER_PV_LOSS        = 0.0148  # fraction of PV lost in conversion (tuned)
+PV_STANDBY_THRESHOLD_KW = 0.05  # kW, above this PV counts as "daytime" for inverter self-use
+EV_CHARGER_KW        = 11.28  # kW, truck draw at full power (tuned: inverter and eGauge agree)
+
+# ── Stationary battery (Pytes V5) ─────────────────────────────────────────────
+# 100 Ah × 51.2 V = 5.12 kWh. Max charge 50 A ≈ 2.56 kW. 100A discharge
 BATT_CAPACITY_AH               = 100
 BATT_NOMINAL_VOLTAGE           = 51.2   # V
 BATT_CHARGE_CURRENT_MAX        = 50     # A
 BATT_DISCHARGE_CURRENT_NOMINAL = 100    # A
-BATT_DISCHARGE_CURRENT_PEAK    = 180    # A
 BATT_SOC_MIN                   = 15     # %
 BATT_SOC_MAX                   = 100    # %
-BATT_SOC_INIT                  = 100    # %
-BATT_CHARGE_EFF                = 1.0    # real ≈ 0.97 (52.7 Wh in per 1% SOC vs 51.2 Wh out)
+BATT_CHARGE_EFF                = 0.972  # tuned: 52.7 Wh in per 1% SOC vs 51.2 Wh out
 BATT_DISCHARGE_EFF             = 1.0
 
-# Sol-Ark Limiter Param > Time of Use, as set on the inverter.
-# Each slot runs until the next start: (start hour, max discharge kW, Batt % floor/target, grid Charge)
-# Batt is the SOC the battery won't discharge below in that slot; with Charge checked the
-# inverter also charges from the grid up to it. Sell is unchecked in every slot.
+# Each slot runs until the next start: (start hour, max discharge kW, Batt % floor)
+# Batt is the SOC the battery won't discharge below in that slot. Sell is unchecked in every
+# slot. The battery is only charged from excess PV, never from the grid (Charge unchecked).
+# PLEASE CHECK IF THIS IS MOST UPDATED TOU SETTING
 BATT_TOU_SCHEDULE = (
-    (0,  2.0, 15,  True),
-    (7,  2.0, 15,  True),
-    (9,  2.0, 100, True),
-    (13, 2.0, 100, True),
-    (17, 2.0, 100, True),
-    (19, 2.0, 15,  True),
+    (0,  2.0, 15),
+    (7,  2.0, 15),
+    (9,  2.0, 100),
+    (13, 2.0, 100),
+    (17, 2.0, 100),
+    (19, 2.0, 15),
 )
-# TODO(team): grid charge rate is set in the Sol-Ark battery settings, not this screen;
-# the charge current limit (50 A) is assumed
 
-# The battery is only ever charged from excess PV, never from the grid, so the Charge
-# column above is ignored. Set to True to follow the inverter's Charge boxes instead.
-BATT_GRID_CHARGE = False
-
-# ── Charger and battery options ───────────────────────────────────────────────
-# Choose with --charger and --batteries; change CHARGER / BATT_MODULES to change the default.
-
-# OpenEVSE Advanced Series 48A (J1772). Charging current is set in whole amps from
-# the J1772 minimum (6 A) up to 48 A continuous, which needs a 60 A circuit.
-# TODO(team): confirm the breaker size (a 50 A circuit limits it to 40 A) and the
-# supply voltage (240 V split phase assumed; 208 V would lower every step)
+# ── Charger ───────────────────────────────────────────────────────────────────
+# OpenEVSE Advanced Series 48A (J1772)
 OPENEVSE_VOLTS = 240
 OPENEVSE_MIN_A = 6
 OPENEVSE_MAX_A = 48
-# 5 settings, like the old IQ 60: off and 25 / 50 / 75 / 100% of 48 A = 12, 24, 36, 48 A.
-OPENEVSE_5_AMPS = tuple(OPENEVSE_MAX_A * k // 4 for k in range(1, 5))
-# 5 settings starting at the OpenEVSE minimum: off and 4 levels evenly spaced from 6 A to
-# 48 A (14 A apart) = 6, 20, 34, 48 A. The lower first level lets the EV use small amounts
-# of solar and halves the clean-grid trickle.
-OPENEVSE_5_LOW_AMPS = tuple(
+# Binary: one current, on or off. 12 A (2.88 kW) was the slowest current that kept the
+# truck. Same as real_time_ems.py EV_CHARGE_AMPS.
+BINARY_AMPS = 12
+# Staged: off and 4 levels evenly spaced from 6 A to 48 A (14 A apart) = 6, 20, 34, 48 A.
+# Same as real_time_ems.py EV_STAGED_AMPS.
+STAGED_AMPS = tuple(
     OPENEVSE_MIN_A + i * (OPENEVSE_MAX_A - OPENEVSE_MIN_A) // 3 for i in range(4)
 )
-# 9 charging levels (10 settings with off), evenly spaced from the minimum to the maximum
-# current and rounded to whole amps: 6, 11, 17, 22, 27, 32, 38, 43, 48 A.
-OPENEVSE_9_AMPS = tuple(
-    int(OPENEVSE_MIN_A + i * (OPENEVSE_MAX_A - OPENEVSE_MIN_A) / 8 + 0.5) for i in range(9)
-)
-
-CHARGERS = {
-    "openevse-5": {
-        "label": "OpenEVSE 48A, 5 settings (off/12/24/36/48 A)",
-        "steps_kw": tuple(amps * OPENEVSE_VOLTS / 1000 for amps in OPENEVSE_5_AMPS),
-    },
-    "openevse-5-6a": {
-        "label": "OpenEVSE 48A, 5 settings (off/6/20/34/48 A)",
-        "steps_kw": tuple(amps * OPENEVSE_VOLTS / 1000 for amps in OPENEVSE_5_LOW_AMPS),
-    },
-    "openevse-9": {
-        "label": "OpenEVSE 48A, 9 levels (6–48 A)",
-        "steps_kw": tuple(amps * OPENEVSE_VOLTS / 1000 for amps in OPENEVSE_9_AMPS),
-    },
-    # same charger, one level per amp (6–48 A)
-    "openevse-every-amp": {
-        "label": "OpenEVSE 48A, every amp",
-        "steps_kw": tuple(amps * OPENEVSE_VOLTS / 1000 for amps in range(OPENEVSE_MIN_A, OPENEVSE_MAX_A + 1)),
-    },
-    # Enphase IQ 60: 25 / 50 / 75 / 100% of 11.5 kW (the charger used through 10/4)
-    "iq60": {
-        "label": "Enphase IQ 60",
-        "steps_kw": tuple(level for level in CHARGER_POWER_LEVELS_KW if level > 0.0),
-    },
-}
-CHARGER = "openevse-5"
-
-# Battery-first priority: solar left after the cooler and other loads fills the battery
-# before it goes to the EV. Staged EMS only gives the EV what the battery can't take;
-# under every controller the EV draws any shortfall from the grid, never the battery.
-BATTERY_FIRST = False
-
-# What the real inverter does: after 7 PM the battery covers the EV like any other load.
-# The team treats that as a mistake to fix at the farm, so it is off by default.
-BATT_POWERS_EV = False
-
-# Sol-Ark solar priority (manual p. 33, "Other" tab). "load-first": solar covers the cooler,
-# base load and EV, and only the rest charges the battery. "batt-first" (the inverter default):
-# solar charges the battery first and the loads take what is left, plus grid power.
-# The 9/13–9/26 inverter data behaves like batt-first.
-SOLAR_PRIORITY = "load-first"
-
-# Stacked Pytes V5 modules in parallel: capacity and the modules' current limits add up.
-# The Sol-Ark Time of Use discharge limit (2 kW) is an inverter setting and stays the same.
-# TODO(team): check the Sol-Ark battery charge/discharge amp settings after adding a module
-BATT_MODULES = 1
+# amps × volts → kW: 12 A = 2.88 kW; staged = 1.44 / 4.8 / 8.16 / 11.52 kW
+BINARY_KW = BINARY_AMPS * OPENEVSE_VOLTS / 1000
+STAGED_KW = tuple(amps * OPENEVSE_VOLTS / 1000 for amps in STAGED_AMPS)
 
 
-def charger_steps_kw() -> tuple[float, ...]:
-    return CHARGERS[CHARGER]["steps_kw"]
+# Battery charged before truck false for now, setting it true only contributes 1lb improvement but less charging for truck
+BATTERY_BEFORE_TRUCK = False
 
 
-# Tuned model: losses, efficiencies and power values fitted to the Sol-Ark data 9/13–9/26
-# (validate_model.py compares it with the real week). Applied with --tuned / use_tuned_model().
-#   Inverter: at night battery out − load ≈ 70 W; the daily counters' gap (PV + buy + discharge
-#     − load − sell − charge) then fits 149 W while PV is producing + 1.48% of PV (within 0.26 kWh/day).
-#   Battery: 51.2 Wh out per 1% SOC (rated), 52.7 Wh in per 1% → 97% charging efficiency.
-#   EV: 11.28 kW at full power (inverter load jump when charging starts, and eGauge, agree).
-#   Cooler: hourly load on non-EV days vs outdoor temperature = 0.457 kW at 60 °F + 0.0165 kW/°F;
-#     minus the flat 0.25 kW wifi/electronics (lights off), the cooler draws 0.207 kW at 60 °F
-#     and reaches 0 at ~47.5 °F, about the real room temperature.
-TUNED_SETTINGS = {
-    "INVERTER_STANDBY_KW": 0.070,
-    "INVERTER_STANDBY_DAY_KW": 0.149,
-    "INVERTER_PV_LOSS": 0.0148,
-    "BATT_CHARGE_EFF": 0.972,
-    "BATT_DISCHARGE_EFF": 1.0,
-    "EV_CHARGER_KW": 11.28,
-    "COOLER_ELECTRIC_KW": 0.207,
-    "COOLER_ELECTRIC_KW_PER_F": 0.0165,
-}
-_UNTUNED_SETTINGS = {name: globals()[name] for name in TUNED_SETTINGS}
-MODEL_TUNED = False
+# The truck is plugged in all week except deliveries. It starts the week at its charge limit,
+# and each delivery uses EV_TRIP_SOC_USED, drained evenly while it is away.
+EV_TRIP_WEEKDAYS   = (1, 3) # Tuesday and Thursday (Monday = 0)
+EV_TRIP_START_HOUR = 9      # unplugged 9:00 AM (assumed)
+EV_TRIP_END_HOUR   = 16     # plugged back in 4:00 PM (assumed)
+EV_TRIP_SOC_USED   = 0.10
 
 
-def use_tuned_model(tuned: bool = True) -> None:
-    """Switch every TUNED_SETTINGS value on (tuned) or back to the original model."""
-    global MODEL_TUNED
-    globals().update(TUNED_SETTINGS if tuned else _UNTUNED_SETTINGS)
-    MODEL_TUNED = tuned
+# Default week: Sun 9/20 – Sat 9/26
+DEFAULT_WEEK_PV     = Path("core/Data/PV_2026-09-20_to_2026-09-27.xlsx")
+DEFAULT_MOER_CSV    = Path("core/Data/watttime_MISO_DETROIT_2026-09-13_to_09-26_utc.csv")
+DEFAULT_OUTDOOR_CSV = Path("core/Data/outdoor_temperatures_2026-09-12_to_09-27.csv")
 
-
-def site_label() -> str:
-    grid = "gridcharge-on" if BATT_GRID_CHARGE else "gridcharge-off"
-    priority = "_battery-first" if BATTERY_FIRST else ""
-    priority += "_batt-first-solar" if SOLAR_PRIORITY == "batt-first" else ""
-    priority += "_batt-powers-ev" if BATT_POWERS_EV else ""
-    priority += "_tuned" if MODEL_TUNED else ""
-    return f"{CHARGER}_{BATT_MODULES}batt_{grid}{priority}"
-
-
-# Week-long runs: the EV is plugged in all week except the Wednesday dining hall trip.
-# It starts the week full and comes back from the trip at EV_TRIP_RETURN_SOC.
-EV_WEEK_SOC_INIT   = EV_SOC_TARGET
-EV_TRIP_WEEKDAY    = 2      # Wednesday (Monday = 0)
-EV_TRIP_START_HOUR = 9      # unplugged 9:00 AM
-EV_TRIP_END_HOUR   = 16     # plugged back in 4:00 PM (charging started 3:20 PM on 9/16, 4:00 PM on 9/23)
-EV_TRIP_RETURN_SOC = 0.20
-
-
-# ── Synthetic grid CO2 signal ─────────────────────────────────────────────────
-
-def synthetic_moer(minute: int) -> float:
-    hour = (minute // 60) % 24
-    peak = 800.0 * np.sin(np.pi * max(0.0, hour - 7) / 14.0) ** 2
-    return 800.0 + peak
-
-
-# ── PV model ──────────────────────────────────────────────────────────────────
-
-class PV:
-    def __init__(
-        self,
-        inv_eff: float = 0.96,
-        max_power: float = PV_MAX_POWER,
-        csv_path: str | None = None,
-    ):
-        self.inv_eff   = inv_eff
-        self.max_power = max_power
-        self.power_kw  = 0.0
-        self._data: pd.DataFrame | None = None
-
-        if csv_path and Path(csv_path).exists():
-            self._data = pd.read_csv(csv_path, usecols=["Minute", "Power"])
-            print(f"[PV] Using CSV data from {csv_path}")
-        else:
-            print("[PV] Using sine-wave approximation (07:00–18:30 daylight window)")
-
-    def update(self, minute: int) -> float:
-        if self._data is not None:
-            idx = min(minute, len(self._data) - 1)
-            self.power_kw = float(self._data.at[idx, "Power"])
-        else:
-            daylight_start = 7 * 60
-            daylight_end   = 18 * 60 + 30
-            duration       = daylight_end - daylight_start
-            t = minute - daylight_start
-            if 0 <= t <= duration:
-                self.power_kw = (self.inv_eff * self.max_power / 2.0) * (
-                    np.sin(np.pi * t / duration) + 1.0
-                )
-            else:
-                self.power_kw = 0.0
-        return self.power_kw
+CONTROLLERS = ("without-ems", "with-ems", "staged-ems")   # "with-ems" = Binary
+CONTROLLER_LABELS = {"without-ems": "No EMS", "with-ems": "Binary EMS", "staged-ems": "Staged EMS"}
 
 
 # ── Cooler model ──────────────────────────────────────────────────────────────
 class Cooler:
+    """Walk-in cooler (CoolBot + AC), Rachel's model.
+
+    temp = indoor (cooler room) °F, outdoor_temp = outside air °F.
+    RC model: room drifts toward outdoor temp, AC pulls it down. Thermostat ±1 °F around setpoint.
+    """
     def __init__(
         self,
-        ambient_f: float  = AMBIENT_TEMP,
+        outdoor_f: float  = OUTDOOR_TEMP,
         setpoint_f: float = SETPOINT_ECON,
-        power_kw: float   = 3.67,
-        cop: float        = 2.0,
-        ri: float         = 3.0,
-        ci: float         = 0.2,
+        power_kw: float   = 3.67,   # AC cooling power for the temperature model
+        cop: float        = 2.0,    # cooling out per unit of electricity
+        ci: float         = 0.2,    # thermal capacitance (how slowly the room changes)
         cold_capacity_factor: float = 0.75,
         cold_outdoor_f: float = 60.0,
         warm_outdoor_f: float = 70.0,
-        electric_kw: float = COOLER_ELECTRIC_KW,
-        electric_kw_per_f: float = COOLER_ELECTRIC_KW_PER_F,
-        electric_ref_f: float = COOLER_ELECTRIC_REF_F,
     ):
-        self.ambient  = ambient_f
+        self.outdoor_temp = outdoor_f
         self.setpoint = setpoint_f
         self.power_kw = power_kw
-        self.electric_kw = electric_kw  # electricity drawn while on; power_kw drives the cooling
-        self.electric_kw_per_f = electric_kw_per_f
-        self.electric_ref_f = electric_ref_f
         self.cop      = cop
-        self.ri       = ri
         self.ci       = ci
         self.cold_capacity_factor = cold_capacity_factor
         self.cold_outdoor_f = cold_outdoor_f
         self.warm_outdoor_f = warm_outdoor_f
-        self.dt       = 1.0 / 60.0
-        self.temp     = setpoint_f + 1.0
-        self._on      = False
-
-    @property
-    def _band_high(self) -> float: return self.setpoint + 1.0
-    @property
-    def _band_low(self)  -> float: return self.setpoint - 1.0
+        self.dt       = 1.0 / 60.0         # one-minute step, in hours
+        self.temp     = setpoint_f + 1.0   # indoor temperature, °F
+        self._on      = False              # AC running?
+        self.fan_on   = False
 
     def _thermostat(self) -> None:
-        if self.temp > self._band_high:
+        # ±1 °F band so the AC doesn't flip on/off every minute
+        if self.temp > self.setpoint + 1.0:
             self._on = True
-        elif self.temp < self._band_low:
+        elif self.temp < self.setpoint - 1.0:
             self._on = False
-    
+
     def _effective_ri(self) -> float:
-        warm_ri = 3.0
-        cold_ri =1.0
-        cold_temp = 50.0
-        warm_temp = 70.0
+        # heat leaks in faster (lower resistance) when it is cold outside: 1 at 50 °F → 3 at 70 °F
+        fraction = np.clip((self.outdoor_temp - 50.0) / (70.0 - 50.0), 0.0, 1.0)
+        return 1.0 + fraction * (3.0 - 1.0)
 
-        fraction = np.clip(
-        (self.ambient - cold_temp)
-        / (warm_temp - cold_temp),
-        0.0,
-        1.0,
-        )
-
-        return cold_ri + fraction * (warm_ri - cold_ri)
-    
     def _capacity_factor(self) -> float:
+        # AC cools less well in cold weather: 75% at 60 °F → 100% at 70 °F
         fraction = np.clip(
-            (self.ambient - self.cold_outdoor_f)
-            / (self.warm_outdoor_f - self.cold_outdoor_f),
-            0.0,
-            1.0,
-        )  
-        return (
-            self.cold_capacity_factor
-            + fraction * (1.0 - self.cold_capacity_factor)
+            (self.outdoor_temp - self.cold_outdoor_f) / (self.warm_outdoor_f - self.cold_outdoor_f),
+            0.0, 1.0,
         )
+        return self.cold_capacity_factor + fraction * (1.0 - self.cold_capacity_factor)
+
+    def _fan_cooling_kw(self) -> float:
+        # TODO(team): fan cooling effect (kW of heat removed) from the fan team's equation.
+        # 0 for now: with the fan "on" and the AC off, the room just drifts toward the outdoor temp.
+        return 0.0
 
     def _thermal_step(self) -> None:
+        # one minute of the RC model: temp moves toward (outdoor − cooling effect)
         alpha = np.exp(-self.dt / (self.ci * self._effective_ri()))
-
         cooling_kw = 0.0
         if self._on:
-            cooling_kw = (
-                self.power_kw
-                * self.cop
-                * self._capacity_factor()
-            )
-
+            cooling_kw += self.power_kw * self.cop * self._capacity_factor()
+        if self.fan_on:
+            cooling_kw += self._fan_cooling_kw()
         self.temp = (
             alpha * self.temp
-            + (1.0 - alpha)
-            * (self.ambient - self._effective_ri() * cooling_kw)
+            + (1.0 - alpha) * (self.outdoor_temp - self._effective_ri() * cooling_kw)
         )
 
-    def update(self, outdoor_f: float | None = None) -> None:
-        if outdoor_f is not None:
-            self.ambient = float(outdoor_f)
-
-        self._thermostat()
+    def update(self, outdoor_f: float, fan_installed: bool = False) -> None:
+        self.outdoor_temp = float(outdoor_f)
+        if fan_installed and self.temp < TMIN:
+            self.fan_on, self._on = False, False     # cold enough: everything off
+        elif fan_installed and self.outdoor_temp < self.temp:
+            self.fan_on, self._on = True, False      # outside is colder: fan instead of AC
+        else:
+            self.fan_on = False
+            self._thermostat()                       # AC follows the setpoint
         self._thermal_step()
 
     def change_setpoint(self, sp: float) -> None:
@@ -385,29 +217,27 @@ class Cooler:
 
     @property
     def instant_power_kw(self) -> float:
-        if not self._on:
-            return 0.0
-        return max(0.0, self.electric_kw + self.electric_kw_per_f * (self.ambient - self.electric_ref_f))
+        # electricity this minute: AC (more the warmer it is outside) + fan
+        ac_kw = 0.0
+        if self._on:
+            ac_kw = max(0.0, COOLER_ELECTRIC_KW
+                        + COOLER_ELECTRIC_KW_PER_F * (self.outdoor_temp - COOLER_ELECTRIC_REF_F))
+        return ac_kw + (FAN_ELECTRIC_KW if self.fan_on else 0.0)
 
 
 # ── EV model ──────────────────────────────────────────────────────────────────
 
 class SimEV(EV):
-    """ev_real_data_simulation's EV, billing only the energy that actually goes in.
+    """The farm truck (KeynesZ's EV class), billing only the energy that actually goes in.
 
-    EV.charge reports the full commanded power even on a minute where the SoC is clamped
-    at the target (e.g. topping up after a sliver of standby loss), which overstates
-    charger and grid energy.
+    soc = how full (0–1), target = charge limit (80%), rate = max charger kW.
+    charge(kW) adds one minute of charging; idle() applies a tiny standby loss.
     """
 
     def charge(self, power_kw: float | None = None, dt_hours: float = 1.0 / 60.0) -> None:
         soc_before = self.soc
-        if EV_TAPER_KWH > 0.0:
-            remaining_kwh = max(0.0, self.target - self.soc) * self.capacity / self.eff
-            if remaining_kwh < EV_TAPER_KWH:
-                taper_kw = max(EV_TAPER_END_KW, self.rate * remaining_kwh / EV_TAPER_KWH)
-                power_kw = min(self.rate if power_kw is None else power_kw, taper_kw)
         super().charge(power_kw, dt_hours)
+        # record the wall power from what was actually stored
         if self.charging:
             stored_kwh = (self.soc - soc_before) * self.capacity
             self.input_power_kw = stored_kwh / self.eff / dt_hours
@@ -417,30 +247,16 @@ class SimEV(EV):
 
 class Battery:
     # Stationary battery on the Sol-Ark inverter (Pytes V5), not the EV battery
-    def __init__(
-        self,
-        capacity_ah: float               = BATT_CAPACITY_AH,
-        nominal_voltage: float           = BATT_NOMINAL_VOLTAGE,
-        charge_current_max: float        = BATT_CHARGE_CURRENT_MAX,
-        discharge_current_nominal: float = BATT_DISCHARGE_CURRENT_NOMINAL,
-        discharge_current_peak: float    = BATT_DISCHARGE_CURRENT_PEAK,
-        soc_min: float                   = BATT_SOC_MIN,
-        soc_max: float                   = BATT_SOC_MAX,
-        soc_init: float                  = BATT_SOC_INIT,
-        modules: int                     = 1,
-    ):
-        # per-module ratings; parallel modules add capacity and current
-        self.modules         = modules
-        self.capacity_ah     = capacity_ah * modules
-        self.nominal_voltage = nominal_voltage
-        self.max_charge_power     = charge_current_max * modules * nominal_voltage / 1000         # kW
-        self.max_discharge_power  = discharge_current_nominal * modules * nominal_voltage / 1000  # kW
-        self.peak_discharge_power = discharge_current_peak * modules * nominal_voltage / 1000     # kW, not modeled yet
-        self.soc_min = soc_min  # %
-        self.soc_max = soc_max  # %
-        self.soc     = soc_init  # %
+    def __init__(self, soc_init: float):
+        self.capacity_ah     = BATT_CAPACITY_AH
+        self.nominal_voltage = BATT_NOMINAL_VOLTAGE
+        self.max_charge_power    = BATT_CHARGE_CURRENT_MAX * BATT_NOMINAL_VOLTAGE / 1000         # kW
+        self.max_discharge_power = BATT_DISCHARGE_CURRENT_NOMINAL * BATT_NOMINAL_VOLTAGE / 1000  # kW
+        self.soc_min = BATT_SOC_MIN  # %
+        self.soc_max = BATT_SOC_MAX  # %
+        self.soc     = soc_init      # %
 
-    # power_kw is measured at the inverter; BATT_CHARGE_EFF / BATT_DISCHARGE_EFF are the losses inside
+    # kW for one minute → amp-hours → % SOC
     def charge(self, power_kw: float, dt_hours: float = 1.0 / 60.0) -> None:
         delta_ah = (power_kw * BATT_CHARGE_EFF * 1000 / self.nominal_voltage) * dt_hours
         self.soc += delta_ah / self.capacity_ah * 100
@@ -458,14 +274,15 @@ class Battery:
         headroom_kw = max(0.0, self._soc_to_kw(self.soc_max - self.soc, dt_hours) / BATT_CHARGE_EFF)
         return min(self.max_charge_power, headroom_kw)
 
+    # Look up this hour's row of the inverter Time of Use table
     @staticmethod
-    def tou_slot(hour: int) -> tuple[float, float, bool]:
-        """(max discharge kW, Batt %, grid Charge) for the Time of Use slot containing hour."""
+    def tou_slot(hour: int) -> tuple[float, float]:
+        """(max discharge kW, Batt %) for the Time of Use slot containing hour."""
         slot = BATT_TOU_SCHEDULE[0]
         for row in BATT_TOU_SCHEDULE:
             if hour >= row[0]:
                 slot = row
-        return slot[1], slot[2], slot[3]
+        return slot[1], slot[2]
 
     def dispatch(
         self,
@@ -475,643 +292,58 @@ class Battery:
         hour: int,
         dt_hours: float = 1.0 / 60.0,
         other_kw: float = 0.0,
-    ) -> tuple[float, float, float, float]:
-        """Sol-Ark order: PV -> loads -> battery -> grid sell; deficit: battery -> grid.
+    ) -> tuple[float, float, float]:
+        """Load First: PV -> loads (truck included) -> battery -> grid sell; shortfall: battery -> grid.
 
-        PV serves the cooler and other loads first. Then the EV, then the battery;
-        with BATTERY_FIRST the battery comes before the EV. The battery covers the
-        cooler and other loads but not the EV (unless BATT_POWERS_EV), and only within the Time of Use slot's
-        discharge limit and Batt %. SOC stays within [soc_min, soc_max].
-        Returns battery kW (charge + / discharge -), grid sell kW, grid buy kW,
-        and the part of the battery charge that came from the grid (kW).
+        The battery charges from PV only and covers the cooler and other loads, never the truck,
+        within the Time of Use slot's discharge limit and Batt %.
+        Returns battery kW (charge + / discharge -), grid sell kW, grid buy kW.
         """
-        max_discharge_kw, slot_soc, grid_charge = self.tou_slot(hour)
-        site_kw = cooler_kw + other_kw
-        site_surplus = pv_kw - site_kw
-        floor = max(self.soc_min, slot_soc)
-        can_discharge = max_discharge_kw > 0 and self.soc > floor + 1e-9
-        battery_loads_kw = site_kw + (ev_kw if BATT_POWERS_EV else 0.0)
-        if SOLAR_PRIORITY == "batt-first" and not (can_discharge and pv_kw < battery_loads_kw):
-            # battery before every load, except when it may discharge and PV can't cover the
-            # loads (e.g. dusk): then PV goes to the loads and the battery covers the rest
-            pv_for_battery = max(0.0, pv_kw)
-        else:
-            pv_for_battery = max(0.0, site_surplus if BATTERY_FIRST else site_surplus - ev_kw)
-        pv_charge = min(pv_for_battery, self.charge_acceptance_kw(dt_hours))
-        surplus_kw = site_surplus - ev_kw - pv_charge
+        max_discharge_kw, slot_soc = self.tou_slot(hour)
+        site_kw = cooler_kw + other_kw          # farm loads except the truck
+        site_surplus = pv_kw - site_kw          # solar left after those loads (negative = short)
+        floor = max(self.soc_min, slot_soc)     # lowest SOC allowed right now (15%, or 100% = no discharge 9–19)
+        pv_for_battery = max(0.0, site_surplus - ev_kw)   # battery gets what's left after all loads
+        pv_charge = min(pv_for_battery, self.charge_acceptance_kw(dt_hours))   # capped by battery limit
+        self.charge(pv_charge, dt_hours)
+        surplus_kw = site_surplus - ev_kw - pv_charge   # + = left over → sold, − = short → battery/grid
         grid_sell = max(0.0, surplus_kw)
 
-        # Charge checked (and grid charging allowed): grid tops the battery up to the slot's Batt %
-        grid_charge_kw = 0.0
-        if grid_charge and BATT_GRID_CHARGE:
-            target_kw = max(0.0, self._soc_to_kw(slot_soc - self.soc, dt_hours) / BATT_CHARGE_EFF - pv_charge)
-            grid_charge_kw = min(self.max_charge_power - pv_charge, target_kw)
-        self.charge(pv_charge + grid_charge_kw, dt_hours)
-
-        # battery only covers the part of the cooler and other loads that PV doesn't (and the EV
-        # with BATT_POWERS_EV); any other shortfall is from the grid
-        grid_buy = max(0.0, -surplus_kw) + grid_charge_kw
+        # battery only covers the part of the cooler and other loads that PV doesn't
+        grid_buy = max(0.0, -surplus_kw)
         discharge_kw = 0.0
-        if surplus_kw < 0 and grid_charge_kw == 0.0 and pv_charge == 0.0:
-            site_deficit = max(0.0, battery_loads_kw - pv_kw)
-            floor = max(self.soc_min, slot_soc)
+        if surplus_kw < 0 and pv_charge == 0.0:
+            site_deficit = max(0.0, site_kw - pv_kw)
             available_kw = max(0.0, self._soc_to_kw(self.soc - floor, dt_hours) * BATT_DISCHARGE_EFF)
             discharge_kw = min(site_deficit, max_discharge_kw, self.max_discharge_power, available_kw)
             self.discharge(discharge_kw, dt_hours)
             grid_buy -= discharge_kw
 
-        batt_power = pv_charge + grid_charge_kw - discharge_kw
-        return batt_power, grid_sell, grid_buy, grid_charge_kw
+        return pv_charge - discharge_kw, grid_sell, grid_buy
 
 
-# ── EMS decision ──────────────────────────────────────────────────────────────
-def ems_setpoint(
-    pv_kw: float,
-    moer: float | None
-    ) -> float:
-
+# ── EMS decisions ─────────────────────────────────────────────────────────────
+# Cooler rule (Binary and Staged): colder (45 °F) when energy is clean, warmer (50 °F) when not.
+# Only matters while the AC is the one cooling (not when the fan rules take over).
+def ems_setpoint(pv_kw: float, moer: float | None) -> float:
     pv_producing = pv_kw >= PV_MIN_PRODUCING
     grid_clean = moer is not None and moer < CO2_THRESHOLD
-    energy_clean = pv_producing or grid_clean
+    return SETPOINT_COOLTH if pv_producing or grid_clean else SETPOINT_ECON
 
-    return SETPOINT_COOLTH if energy_clean else SETPOINT_ECON
 
-def _load_outdoor_temperatures(
-    outdoor_csv_path: str | Path,
-    simulation_date: str | pd.Timestamp | None = None,
-) -> pd.Series:
-    """
-    Read hourly outdoor temperatures and interpolate them to one-minute values.
+# Truck rules. surplus_kw = excess solar (PV left after the cooler, other loads and inverter losses)
+def binary_charger_kw(surplus_kw: float) -> float:
+    """BINARY_KW while excess solar covers it, otherwise off."""
+    return BINARY_KW if surplus_kw >= BINARY_KW else 0.0
 
-    The returned Series:
-      - has timestamps as its index;
-      - has outdoor temperatures in °F as its values;
-      - uses the America/Detroit time zone.
-    """
-    outdoor = pd.read_csv(
-        outdoor_csv_path,
-        usecols=["timestamp", "temperature_f"],
-    )
 
-    outdoor["temperature_f"] = pd.to_numeric(
-        outdoor["temperature_f"],
-        errors="coerce",
-    )
+def staged_charger_kw(surplus_kw: float) -> float:
+    """Highest staged level the excess solar fully covers (rounded down), otherwise off."""
+    covered = [level for level in STAGED_KW if level <= surplus_kw]   # levels solar can pay for
+    return max(covered) if covered else 0.0                           # e.g. 6 kW excess → 4.8 kW (20 A)
 
-    outdoor["timestamp"] = pd.to_datetime(
-        outdoor["timestamp"],
-        errors="coerce",
-    )
 
-    if outdoor["timestamp"].dt.tz is None:
-        outdoor["timestamp"] = outdoor["timestamp"].dt.tz_localize(
-            "America/Detroit",
-            ambiguous="infer",
-            nonexistent="shift_forward",
-        )
-    else:
-        outdoor["timestamp"] = outdoor["timestamp"].dt.tz_convert(
-            "America/Detroit"
-        )
-
-    outdoor = (
-        outdoor
-        .dropna(subset=["timestamp", "temperature_f"])
-        .sort_values("timestamp")
-        .drop_duplicates(subset=["timestamp"], keep="last")
-    )
-
-    if outdoor.empty:
-        raise ValueError(
-            f"No valid outdoor-temperature data found in {outdoor_csv_path}"
-        )
-
-    outdoor_by_minute = (
-        outdoor
-        .set_index("timestamp")["temperature_f"]
-        .resample("1min")
-        .interpolate(method="time")
-    )
-
-    if simulation_date is None:
-        start = outdoor_by_minute.index.min().normalize()
-    else:
-        start = pd.Timestamp(simulation_date)
-
-        if start.tzinfo is None:
-            start = start.tz_localize("America/Detroit")
-        else:
-            start = start.tz_convert("America/Detroit")
-
-        start = start.normalize()
-
-    end = start + pd.DateOffset(days=1)
-
-    outdoor_day = outdoor_by_minute.loc[
-        (outdoor_by_minute.index >= start)
-        & (outdoor_by_minute.index < end)
-    ]
-
-    if outdoor_day.empty:
-        raise ValueError(
-            f"No outdoor-temperature data found for {start.date()}"
-        )
-
-    return outdoor_day
-
-
-# ── Scenario definitions ──────────────────────────────────────────────────────
-
-# No-EMS cooler: the real CoolBot holds a fixed 38 °F setpoint (core/Data/room_temperature_30d.csv)
-SETPOINT_NO_EMS = 38
-
-CONTROLLERS = ("without-ems", "with-ems", "staged-ems")
-CONTROLLER_LABELS = {
-    "without-ems": "No EMS",
-    "with-ems": "Binary EMS",
-    "staged-ems": "Staged EMS",
-}
-CONTROLLER_COLORS = {
-    "without-ems": "dimgray",
-    "with-ems": "steelblue",
-    "staged-ems": "darkorange",
-}
-
-# Same sample days and scenario layout as ev_real_data_simulation.py
-DAY_KEYS = {"High PV": "high-pv", "Typical Day": "typical-day", "Low PV": "low-pv"}
-SCENARIOS = {
-    "scenario-1-baseline": (("Typical Day",), ("without-ems",)),
-    "scenario-2-binary": (SAMPLE_DAY_LABELS, ("without-ems", "with-ems")),
-    "scenario-3-staged": (("Typical Day",), CONTROLLERS),
-}
-
-
-def staged_charger_kw(surplus_kw: float, moer_condition: bool) -> float:
-    """Highest charger step the PV surplus fully covers (rounded down).
-
-    Below the lowest step, trickle at the lowest step only when the grid is clean.
-    """
-    steps = charger_steps_kw()
-    covered = [level for level in steps if level <= surplus_kw]
-    if covered:
-        return max(covered)
-    return steps[0] if moer_condition else 0.0
-
-
-# ── Simulation ────────────────────────────────────────────────────────────────
-
-def day_inputs(
-    outdoor_csv_path: str | Path = "core/Data/outdoor_temperatures.csv",
-    simulation_date: str | pd.Timestamp | None = None,
-    pv_csv_path: str | None = None,
-    pv_xlsx_path: str | Path | None = None,
-    moer_source: str = "historical",
-    watttime_region: str = "MISO_DETROIT",
-    watttime_cache_dir: str | Path = "results/ev_simulation/cache",
-) -> pd.DataFrame:
-    """One row per minute: pv_kw, moer_lb_per_mwh, outdoor_f.
-
-    With a Sol-Ark workbook, PV and WattTime MOER are real and the day follows the
-    workbook; otherwise PV comes from the CSV or sine wave and MOER is synthetic.
-    """
-    real_data = None
-    if pv_xlsx_path is not None:
-        real_data = _load_real_inputs(
-            Path(pv_xlsx_path),
-            moer_source,
-            watttime_region,
-            Path(watttime_cache_dir),
-        )
-        simulation_date = real_data.index[0]
-
-    outdoor_day = _load_outdoor_temperatures(
-        outdoor_csv_path,
-        simulation_date=simulation_date,
-    )
-    simulation_start = outdoor_day.index.min().normalize()
-    simulation_times = pd.date_range(
-        start=simulation_start,
-        periods=1440,
-        freq="1min",
-    )
-    outdoor_temps = outdoor_day.reindex(
-        simulation_times,
-        method="nearest",
-        tolerance=pd.Timedelta("1 hour"),
-    )
-    if outdoor_temps.isna().any():
-        missing = int(outdoor_temps.isna().sum())
-        raise ValueError(
-            f"Missing outdoor temperature for {missing} simulation minutes"
-        )
-
-    if real_data is not None:
-        pv_kw = real_data["pv_kw"].to_numpy()[:1440]
-        moer = real_data["moer_lb_per_mwh"].to_numpy()[:1440]
-    else:
-        pv = PV(csv_path=pv_csv_path)
-        minutes = [t.hour * 60 + t.minute for t in simulation_times]
-        pv_kw = [pv.update(minute) for minute in minutes]
-        moer = [synthetic_moer(minute) for minute in minutes]
-
-    return pd.DataFrame(
-        {
-            "pv_kw": pv_kw,
-            "moer_lb_per_mwh": moer,
-            "outdoor_f": outdoor_temps.to_numpy(),
-        },
-        index=simulation_times,
-    )
-
-
-def run_day(
-    inputs: pd.DataFrame,
-    controller: str = "with-ems",
-    ev_soc_init: float = EV_SOC_INIT,
-    battery_soc_init: float = BATT_SOC_INIT,
-) -> pd.DataFrame:
-    """Run cooler, EV and battery through the inputs (one day or longer) under one controller.
-
-    without-ems: cooler at the fixed CoolBot setpoint, EV charges whenever below target
-    with-ems   : 35/48 °F clean/dirty setpoint, EV at full power only when clean
-    staged-ems : same cooler rule, EV at the charger step covered by PV after the cooler
-    The battery follows the Sol-Ark Time of Use schedule and never powers the EV (unless BATT_POWERS_EV).
-
-    If inputs has an ev_trip_fraction column, the EV is unplugged wherever it is set
-    (0 → 1 over the trip) and drains linearly to EV_TRIP_RETURN_SOC by the time it returns.
-    """
-    if controller not in CONTROLLERS:
-        raise ValueError(f"controller must be one of {CONTROLLERS}")
-
-    cooler = Cooler(electric_kw=COOLER_ELECTRIC_KW, electric_kw_per_f=COOLER_ELECTRIC_KW_PER_F,
-                    electric_ref_f=COOLER_ELECTRIC_REF_F)
-    ev = SimEV(soc_init=ev_soc_init, charge_rate_kw=EV_CHARGER_KW or max(charger_steps_kw()))
-    battery = Battery(soc_init=battery_soc_init, modules=BATT_MODULES)
-    cooler.ambient = float(inputs["outdoor_f"].iloc[0])
-    trip_fraction = (
-        inputs["ev_trip_fraction"] if "ev_trip_fraction" in inputs
-        else pd.Series(np.nan, index=inputs.index)
-    )
-    departure_soc = None
-    records: list[dict] = []
-
-    for timestamp, row in inputs.iterrows():
-        pv_kw = float(row["pv_kw"])
-        pv_ac_kw = pv_kw * (1.0 - INVERTER_PV_LOSS)   # after conversion loss
-        other_kw = OTHER_LOAD_KW
-        standby_kw = INVERTER_STANDBY_DAY_KW if pv_kw > PV_STANDBY_THRESHOLD_KW else INVERTER_STANDBY_KW
-        moer = float(row["moer_lb_per_mwh"])
-        moer_condition = moer < CO2_THRESHOLD
-        energy_clean = pv_kw >= PV_MIN_PRODUCING or moer_condition
-
-        if controller == "without-ems":
-            sp = SETPOINT_NO_EMS
-        else:
-            sp = ems_setpoint(pv_kw, moer)
-        cooler.change_setpoint(sp)
-        cooler.update(outdoor_f=float(row["outdoor_f"]))
-
-        # TODO(team): the old simulator counted battery discharge as a supply when PV is low
-        # (COMBO instead of GRID_SUPPORT). energy_clean only looks at PV and MOER; decide
-        # whether battery energy should count as clean for the cooler setpoint and EV charging
-        trip = trip_fraction.loc[timestamp]
-        plugged = pd.isna(trip)
-        if not plugged:
-            # away from the charger: drain linearly toward the return SOC
-            if departure_soc is None:
-                departure_soc = ev.soc
-            ev.soc = departure_soc - (departure_soc - EV_TRIP_RETURN_SOC) * float(trip)
-            ev.charging = False
-            ev.input_power_kw = 0.0
-        else:
-            departure_soc = None
-            if controller == "without-ems":
-                ev_kw = ev.rate
-            elif controller == "with-ems":
-                ev_kw = ev.rate if energy_clean else 0.0
-            else:
-                surplus_kw = pv_ac_kw - cooler.instant_power_kw - other_kw - standby_kw
-                if BATTERY_FIRST or SOLAR_PRIORITY == "batt-first":
-                    surplus_kw -= battery.charge_acceptance_kw()
-                ev_kw = staged_charger_kw(surplus_kw, moer_condition)
-            ev_kw = min(ev_kw, ev.rate)
-            ev.charge(ev_kw) if ev_kw > 0.0 else ev.idle()
-
-        # battery dispatch on this minute's loads; the battery never powers the EV unless BATT_POWERS_EV
-        # TODO(team): confirm the cooler is on the inverter LOAD port ("Limited power to Load")
-        batt_power, grid_sell, grid_buy, batt_grid_charge = battery.dispatch(
-            pv_ac_kw, cooler.instant_power_kw, ev.input_power_kw, timestamp.hour,
-            other_kw=other_kw + standby_kw,
-        )
-
-        records.append(
-            {
-                "timestamp": timestamp,
-                "pv_kw": pv_kw,
-                "moer_lb_per_mwh": moer,
-                "outdoor_f": float(row["outdoor_f"]),
-                "setpoint_f": sp,
-                "cooler_temp_f": cooler.temp,
-                "cooler_kw": cooler.instant_power_kw,
-                "other_load_kw": other_kw,
-                "inverter_loss_kw": standby_kw + pv_kw - pv_ac_kw,
-                "ev_kw": ev.input_power_kw,
-                "ev_plugged": plugged,
-                "ev_soc_percent": ev.soc * 100.0,
-                "battery_kw": batt_power,
-                "battery_grid_charge_kw": batt_grid_charge,
-                "battery_soc_percent": battery.soc,
-                "grid_sell_kw": grid_sell,
-                "grid_buy_kw": grid_buy,
-            }
-        )
-
-    return pd.DataFrame.from_records(records).set_index("timestamp")
-
-
-def summarize(results: pd.DataFrame, day_label: str, controller: str) -> dict:
-    kwh = lambda column: float(results[column].sum() / 60.0)
-    target = results[results["ev_soc_percent"] >= EV_SOC_TARGET * 100.0 - 1e-9]
-    charging = results[results["ev_kw"] > 0]
-    ev_kwh = kwh("ev_kw")
-    return {
-        "day": day_label,
-        "date": results.index[0].date().isoformat(),
-        "controller": controller,
-        "pv_kwh": kwh("pv_kw"),
-        "cooler_kwh": kwh("cooler_kw"),
-        "cooler_min_f": float(results["cooler_temp_f"].min()),
-        "cooler_max_f": float(results["cooler_temp_f"].max()),
-        "cooler_unsafe_minutes": int(
-            ((results["cooler_temp_f"] < TMIN) | (results["cooler_temp_f"] > TMAX)).sum()
-        ),
-        "ev_kwh": ev_kwh,
-        "ev_final_soc_percent": float(results["ev_soc_percent"].iloc[-1]),
-        "ev_target_reached_at": (
-            None if target.empty else target.index[0].strftime("%H:%M")
-        ),
-        "ev_avg_charging_moer": (
-            float((charging["ev_kw"] * charging["moer_lb_per_mwh"]).sum() / charging["ev_kw"].sum())
-            if ev_kwh > 0 else None
-        ),
-        "battery_charged_kwh": float(results["battery_kw"].clip(lower=0).sum() / 60.0),
-        "battery_discharged_kwh": float(-results["battery_kw"].clip(upper=0).sum() / 60.0),
-        "battery_grid_charged_kwh": kwh("battery_grid_charge_kw"),
-        "battery_final_soc_percent": float(results["battery_soc_percent"].iloc[-1]),
-        "grid_buy_kwh": kwh("grid_buy_kw"),
-        "grid_sell_kwh": kwh("grid_sell_kw"),
-        # whole-farm grid import weighted by MOER; exports get no credit
-        "grid_emissions_lb": float(
-            (results["grid_buy_kw"] * results["moer_lb_per_mwh"]).sum() / 60.0 / 1000.0
-        ),
-    }
-
-
-def simulate(
-    pv_csv_path: str | None = None,
-    cooler_csv_path: str | None = None,
-    outdoor_csv_path: str = "core/Data/outdoor_temperatures.csv",
-    simulation_date: str | pd.Timestamp | None = None,
-    pv_xlsx_path: str | Path | None = None,
-    moer_source: str = "historical",
-    watttime_region: str = "MISO_DETROIT",
-    watttime_cache_dir: str | Path = "results/ev_simulation/cache",
-    controller: str = "with-ems",
-) -> None:
-    inputs = day_inputs(
-        outdoor_csv_path,
-        simulation_date,
-        pv_csv_path,
-        pv_xlsx_path,
-        moer_source,
-        watttime_region,
-        watttime_cache_dir,
-    )
-    results = run_day(inputs, controller)
-    summary = summarize(results, "Single day", controller)
-
-    print(f"Final EV SoC:          {summary['ev_final_soc_percent']:.1f}%")
-    print(f"Final battery SoC:     {summary['battery_final_soc_percent']:.1f}%")
-    print(f"Cooler temp range:     {summary['cooler_min_f']:.1f}–{summary['cooler_max_f']:.1f} °F")
-    print(f"Total PV energy:       {summary['pv_kwh']:.2f} kWh")
-    print(f"Total cooler energy:   {summary['cooler_kwh']:.2f} kWh")
-    print(f"Total EV energy:       {summary['ev_kwh']:.2f} kWh")
-    print(f"Battery charged:       {summary['battery_charged_kwh']:.2f} kWh "
-          f"({summary['battery_grid_charged_kwh']:.2f} kWh from grid)")
-    print(f"Battery discharged:    {summary['battery_discharged_kwh']:.2f} kWh")
-    print(f"Grid sell:             {summary['grid_sell_kwh']:.2f} kWh")
-    print(f"Grid buy:              {summary['grid_buy_kwh']:.2f} kWh")
-
-    _plot(results)
-
-
-def run_scenario(
-    scenario: str,
-    workbooks: dict[str, Path | None],
-    outdoor_csv_path: str | Path,
-    output_dir: Path,
-    synthetic: bool = False,
-    moer_source: str = "historical",
-    watttime_region: str = "MISO_DETROIT",
-    watttime_cache_dir: str | Path = "results/ev_simulation/cache",
-    show_plot: bool = False,
-) -> pd.DataFrame:
-    """Run one scenario over its sample days and controllers; save CSVs and a plot."""
-    day_labels, controllers = SCENARIOS[scenario]
-    scenario_dir = output_dir / f"{scenario}_{site_label()}"
-    scenario_dir.mkdir(parents=True, exist_ok=True)
-
-    results_by_day: dict[str, dict[str, pd.DataFrame]] = {}
-    summaries: list[dict] = []
-    for label in day_labels:
-        if synthetic:
-            inputs = day_inputs(
-                outdoor_csv_path,
-                simulation_date=SCENARIO_EXPECTED_DATES[DAY_KEYS[label]].isoformat(),
-            )
-        else:
-            inputs = day_inputs(
-                outdoor_csv_path,
-                pv_xlsx_path=workbooks[label],
-                moer_source=moer_source,
-                watttime_region=watttime_region,
-                watttime_cache_dir=watttime_cache_dir,
-            )
-        results_by_day[label] = {}
-        for controller in controllers:
-            results = run_day(inputs, controller)
-            results_by_day[label][controller] = results
-            summaries.append(summarize(results, label, controller))
-            results.to_csv(scenario_dir / f"{DAY_KEYS[label]}_{controller}_minutes.csv")
-
-    summary = pd.DataFrame(summaries)
-    summary.to_csv(scenario_dir / "summary.csv", index=False)
-    _plot_scenario(scenario, results_by_day, scenario_dir / "comparison.png", show_plot)
-    _print_scenario(scenario, summary, synthetic)
-    print(f"Outputs: {scenario_dir.resolve()}\n")
-    return summary
-
-
-def _load_real_inputs(
-    pv_xlsx: Path,
-    moer_source: str,
-    region: str,
-    cache_dir: Path,
-) -> pd.DataFrame:
-    """Sol-Ark PV and WattTime MOER, one row per minute, via ev_real_data_simulation."""
-    day = load_solark_pv(pv_xlsx, "America/Detroit").index[0].date()
-    cache_path = cache_dir / f"{moer_source}_{region}_{day.isoformat()}.json"
-    token = "cache-only" if cache_path.exists() else get_watttime_token()
-    return real_inputs(
-        pv_xlsx,
-        "America/Detroit",
-        region,
-        token,
-        cache_path,
-        moer_source,
-    )
-
-
-def _print_scenario(scenario: str, summary: pd.DataFrame, synthetic: bool) -> None:
-    source = "sine-wave PV + synthetic MOER" if synthetic else "Sol-Ark PV + WattTime MOER"
-    print(f"{scenario} ({source})")
-    header = (
-        f"{'Day':<13}{'Controller':<12}{'EV 95% at':>10}{'EV kWh':>9}"
-        f"{'Grid buy':>10}{'Grid sell':>11}{'Grid CO2 lb':>13}{'Batt end':>10}{'Cooler °F':>13}"
-    )
-    print(header)
-    print("-" * len(header))
-    for row in summary.itertuples():
-        print(
-            f"{row.day:<13}{CONTROLLER_LABELS[row.controller]:<12}"
-            f"{row.ev_target_reached_at or 'N/R':>10}{row.ev_kwh:>9.1f}"
-            f"{row.grid_buy_kwh:>10.1f}{row.grid_sell_kwh:>11.1f}{row.grid_emissions_lb:>13.1f}"
-            f"{row.battery_final_soc_percent:>9.0f}%"
-            f"{row.cooler_min_f:>7.1f}–{row.cooler_max_f:.1f}"
-        )
-
-
-def _plot_scenario(
-    scenario: str,
-    results_by_day: dict[str, dict[str, pd.DataFrame]],
-    output_path: Path,
-    show_plot: bool,
-) -> None:
-    rows = (
-        ("ev_soc_percent", "EV SoC (%)"),
-        ("cooler_temp_f", "Cooler (°F)"),
-        ("battery_soc_percent", "Battery SoC (%)"),
-        ("grid_buy_kw", "Grid buy (kW)"),
-    )
-    labels = list(results_by_day)
-    fig, axes = plt.subplots(
-        len(rows) + 1, len(labels),
-        figsize=(6 * len(labels), 14), sharex=True, squeeze=False,
-    )
-    fig.suptitle(f"Campus Farm EMS — {scenario}", fontsize=13)
-    time_h = [m / 60.0 for m in range(1440)]
-
-    for col, label in enumerate(labels):
-        runs = results_by_day[label]
-        inputs = next(iter(runs.values()))
-
-        ax = axes[0][col]
-        ax.plot(time_h, inputs["pv_kw"], color="orange", label="PV (kW)")
-        ax.plot(time_h, inputs["moer_lb_per_mwh"] / 1000.0, color="gray", linestyle="--",
-                alpha=0.6, label="MOER (×10³ lbs/MWh)")
-        ax.axhline(CO2_THRESHOLD / 1000.0, color="gray", linestyle=":", linewidth=0.8)
-        ax.set_title(f"{label} ({inputs.index[0].date()})")
-        ax.legend(fontsize=8, loc="upper right")
-        ax.grid(True, alpha=0.3)
-
-        for row, (column, ylabel) in enumerate(rows, start=1):
-            ax = axes[row][col]
-            for controller, results in runs.items():
-                ax.plot(time_h, results[column], color=CONTROLLER_COLORS[controller],
-                        label=CONTROLLER_LABELS[controller], alpha=0.85)
-            if column == "cooler_temp_f":
-                ax.fill_between(time_h, TMIN, TMAX, color="green", alpha=0.05)
-            if col == 0:
-                ax.set_ylabel(ylabel)
-            ax.legend(fontsize=8, loc="upper right")
-            ax.grid(True, alpha=0.3)
-
-        axes[-1][col].set_xlabel("Hour of day")
-        axes[-1][col].set_xticks(range(0, 25, 2))
-
-    plt.tight_layout()
-    fig.savefig(output_path, dpi=120)
-    if show_plot:
-        plt.show()
-    plt.close(fig)
-
-
-def _plot(results: pd.DataFrame) -> None:
-    time_h = [m / 60.0 for m in range(1440)]
-
-    fig, axes = plt.subplots(6, 1, figsize=(13, 16), sharex=True)
-    fig.suptitle("Campus Farm EMS — 1-day simulation", fontsize=13)
-
-    ax = axes[0]
-    ax.plot(time_h, results["pv_kw"], color="orange", label="PV output (kW)")
-    ax.plot(time_h, results["moer_lb_per_mwh"] / 1000.0, color="gray", linestyle="--",
-            alpha=0.6, label="Grid MOER (×10³ lbs/MWh)")
-    ax.axhline(CO2_THRESHOLD / 1000.0, color="gray", linestyle=":", linewidth=0.8,
-               label=f"CO₂ threshold ({CO2_THRESHOLD} lbs/MWh)")
-    ax.set_ylabel("kW / (×10³ lbs/MWh)")
-    ax.legend(fontsize=8, loc="upper right")
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[1]
-    ax.plot(time_h, results["setpoint_f"],    color="steelblue", label="Setpoint (°F)", linewidth=1.5)
-    ax.plot(time_h, results["cooler_temp_f"], color="crimson",   label="Actual temp (°F)", alpha=0.8)
-    ax.axhline(TMIN, color="blue", linestyle="--", linewidth=0.8, label=f"TMIN={TMIN}°F")
-    ax.axhline(TMAX, color="red",  linestyle="--", linewidth=0.8, label=f"TMAX={TMAX}°F")
-    ax.fill_between(time_h, TMIN, TMAX, color="green", alpha=0.05, label="Safe zone")
-    ax.set_ylabel("°F")
-    ax.legend(fontsize=8, loc="upper right")
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[2]
-    ax.plot(time_h, results["ev_soc_percent"], color="green", label="EV SoC (%)")
-    ax.axhline(EV_SOC_TARGET * 100, color="gray", linestyle="--", linewidth=0.8,
-               label=f"Target {EV_SOC_TARGET * 100:.0f}%")
-    ax.set_ylim(0, 105)
-    ax.set_ylabel("%")
-    ax.legend(fontsize=8, loc="lower right")
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[3]
-    ax.plot(time_h, results["cooler_kw"], color="purple", label="Cooler load (kW)")
-    ax.plot(time_h, results["ev_kw"], color="green", label="EV charger (kW)")
-    ax.set_ylabel("kW")
-    ax.legend(fontsize=8, loc="upper right")
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[4]
-    ax.plot(time_h, results["battery_soc_percent"], color="teal", label="Battery SoC (%)")
-    ax.axhline(BATT_SOC_MIN, color="gray", linestyle="--", linewidth=0.8,
-               label=f"SoC min {BATT_SOC_MIN}%")
-    ax.set_ylim(0, 105)
-    ax.set_ylabel("%")
-    ax.legend(fontsize=8, loc="lower right")
-    ax.grid(True, alpha=0.3)
-
-    ax = axes[5]
-    ax.plot(time_h, results["battery_kw"], color="teal", label="Battery (charge +, discharge −)")
-    ax.plot(time_h, results["grid_sell_kw"], color="goldenrod", label="Grid sell (kW)")
-    ax.plot(time_h, results["grid_buy_kw"], color="dimgray", label="Grid buy (kW)")
-    ax.set_xlabel("Hour of day")
-    ax.set_ylabel("kW")
-    ax.set_xticks(range(0, 25, 2))
-    ax.legend(fontsize=8, loc="upper right")
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.show()
-
-
-# ── Week-long simulation ──────────────────────────────────────────────────────
+# ── Week inputs ───────────────────────────────────────────────────────────────
 
 def load_solark_pv_range(xlsx_path: Path, timezone: str = "America/Detroit") -> pd.Series:
     """Sol-Ark Operation Data export covering one or more whole days, as one-minute PV kW."""
@@ -1163,7 +395,7 @@ def load_moer_csv(csv_path: Path, minutes: pd.DatetimeIndex) -> tuple[pd.Series,
 
 
 def load_outdoor_range(csv_path: Path, minutes: pd.DatetimeIndex) -> pd.Series:
-    """Hourly outdoor temperatures interpolated to the simulation minutes."""
+    """Hourly outdoor temperatures (Open-Meteo CSV) interpolated to the simulation minutes."""
     outdoor = pd.read_csv(csv_path, usecols=["timestamp", "temperature_f"])
     times = pd.to_datetime(outdoor["timestamp"]).dt.tz_localize(
         minutes.tz, ambiguous="infer", nonexistent="shift_forward"
@@ -1181,11 +413,11 @@ def load_outdoor_range(csv_path: Path, minutes: pd.DatetimeIndex) -> pd.Series:
 
 
 def ev_trip_fraction(minutes: pd.DatetimeIndex) -> pd.Series:
-    """Fraction of the Wednesday trip elapsed (0 → 1) while away; NaN while plugged in."""
+    """Fraction of each delivery trip elapsed (0 → 1) while away; NaN while plugged in."""
     fraction = pd.Series(np.nan, index=minutes)
-    trip_minutes = (EV_TRIP_END_HOUR - EV_TRIP_START_HOUR) * 60
+    trip_minutes = (EV_TRIP_END_HOUR - EV_TRIP_START_HOUR) * 60   # 7 h = 420 min
     for day in pd.unique(minutes.normalize()):
-        if day.weekday() != EV_TRIP_WEEKDAY:
+        if day.weekday() not in EV_TRIP_WEEKDAYS:   # only Tuesdays and Thursdays
             continue
         start = day + pd.Timedelta(hours=EV_TRIP_START_HOUR)
         away = (minutes >= start) & (minutes < day + pd.Timedelta(hours=EV_TRIP_END_HOUR))
@@ -1195,6 +427,7 @@ def ev_trip_fraction(minutes: pd.DatetimeIndex) -> pd.Series:
 
 
 def week_inputs(pv_xlsx: Path, moer_csv: Path, outdoor_csv: Path) -> pd.DataFrame:
+    """The week's inputs, one row per minute: real solar, grid CO2, outdoor temp, deliveries."""
     pv = load_solark_pv_range(pv_xlsx)
     minutes = pv.index
     moer, moer_filled = load_moer_csv(moer_csv, minutes)
@@ -1210,329 +443,246 @@ def week_inputs(pv_xlsx: Path, moer_csv: Path, outdoor_csv: Path) -> pd.DataFram
     )
 
 
+# ── Simulation ────────────────────────────────────────────────────────────────
+
+def run_minutes(inputs: pd.DataFrame, controller: str, battery_soc_init: float) -> pd.DataFrame:
+    """Run cooler, truck and battery through every minute of the inputs under one mode."""
+    if controller not in CONTROLLERS:
+        raise ValueError(f"controller must be one of {CONTROLLERS}")
+
+    # ── set up the three devices ──
+    cooler = Cooler(outdoor_f=float(inputs["outdoor_f"].iloc[0]))
+    ev = SimEV(soc_init=EV_SOC_TARGET, soc_target=EV_SOC_TARGET, charge_rate_kw=EV_CHARGER_KW,
+               capacity_kwh=EV_CAPACITY, charge_eff=EV_CHARGE_EFF)
+    battery = Battery(soc_init=battery_soc_init)
+    fan_installed = FAN_INSTALLED and controller != "without-ems"   # No EMS = the farm today, no fan
+    departure_soc = None                # truck SOC when the current delivery left
+    wants_charge = ev.soc < ev.target   # truck below its limit?
+    ems_ev_kw = 0.0                     # last EMS charging decision, held between decisions
+    records: list[dict] = []            # one row of results per minute
+
+    # ── one loop pass = one minute ──
+    for step, (timestamp, row) in enumerate(inputs.iterrows()):
+        # 1. this minute's inputs
+        pv_kw = float(row["pv_kw"])
+        pv_ac_kw = pv_kw * (1.0 - INVERTER_PV_LOSS)   # after conversion loss
+        other_kw = OTHER_LOAD_KW                       # wifi/electronics, always on
+        # inverter's own power use (higher in the day)
+        standby_kw = INVERTER_STANDBY_DAY_KW if pv_kw > PV_STANDBY_THRESHOLD_KW else INVERTER_STANDBY_KW
+        moer = float(row["moer_lb_per_mwh"])
+
+        # 2. cooler: pick the setpoint, then run one minute of the fan/thermostat and temperature
+        if controller == "without-ems":
+            sp = SETPOINT_NO_EMS               # fixed 38 °F, like the CoolBot today
+        else:
+            sp = ems_setpoint(pv_kw, moer)     # 45 °F clean / 50 °F dirty
+        cooler.change_setpoint(sp)
+        cooler.update(float(row["outdoor_f"]), fan_installed)
+
+        # 3. truck
+        trip = row["ev_trip_fraction"]
+        plugged = pd.isna(trip)
+        if not plugged:
+            # away on a delivery: drain EV_TRIP_SOC_USED evenly over the trip
+            if departure_soc is None:
+                departure_soc = ev.soc
+            ev.soc = departure_soc - EV_TRIP_SOC_USED * float(trip)
+            ev.charging = False
+            ev.input_power_kw = 0.0
+        else:
+            departure_soc = None
+            # does the truck need charge? starts below 79%, stops at 80%
+            if ev.soc <= ev.target - EV_RESUME_MARGIN:
+                wants_charge = True
+            elif ev.soc >= ev.target - 1e-9:
+                wants_charge = False
+
+            if controller == "without-ems":
+                ev_kw = ev.rate                    # No EMS: full power, any time
+            else:
+                if step % DECISION_MINUTES == 0:   # EMS decides every 5 minutes
+                    # excess solar = PV − cooler − other loads − inverter use
+                    surplus_kw = pv_ac_kw - cooler.instant_power_kw - other_kw - standby_kw
+                    if BATTERY_BEFORE_TRUCK:
+                        surplus_kw -= battery.charge_acceptance_kw()   # leave the battery its share
+                    ems_ev_kw = (binary_charger_kw(surplus_kw) if controller == "with-ems"
+                                 else staged_charger_kw(surplus_kw))
+                ev_kw = ems_ev_kw                  # between decisions, keep the last one
+            ev_kw = min(ev_kw, ev.rate) if wants_charge else 0.0
+            ev.charge(ev_kw) if ev_kw > 0.0 else ev.idle()   # one minute of charging (or standing)
+
+        # 4. battery and grid: share out this minute's solar (the battery never powers the truck)
+        batt_power, grid_sell, grid_buy = battery.dispatch(
+            pv_ac_kw, cooler.instant_power_kw, ev.input_power_kw, timestamp.hour,
+            other_kw=other_kw + standby_kw,
+        )
+
+        # 5. save this minute
+        records.append(
+            {
+                "timestamp": timestamp,
+                "pv_kw": pv_kw,
+                "moer_lb_per_mwh": moer,
+                "outdoor_f": cooler.outdoor_temp,
+                "setpoint_f": sp,
+                "cooler_temp_f": cooler.temp,
+                "fan_on": cooler.fan_on,
+                "cooler_kw": cooler.instant_power_kw,
+                "other_load_kw": other_kw,
+                "inverter_loss_kw": standby_kw + pv_kw - pv_ac_kw,
+                "ev_kw": ev.input_power_kw,
+                "ev_plugged": plugged,
+                "ev_soc_percent": ev.soc * 100.0,
+                "battery_kw": batt_power,
+                "battery_soc_percent": battery.soc,
+                "grid_sell_kw": grid_sell,
+                "grid_buy_kw": grid_buy,
+            }
+        )
+
+    return pd.DataFrame.from_records(records).set_index("timestamp")
+
+
 def run_week(inputs: pd.DataFrame, controller: str) -> pd.DataFrame:
     """Run the week continuously.
 
     The battery's starting SOC is taken from the end of a first pass, so the week
     starts the way it ends (no assumption about Sunday midnight).
     """
-    first = run_day(inputs, controller, ev_soc_init=EV_WEEK_SOC_INIT, battery_soc_init=BATT_SOC_MIN)
+    # pass 1 only finds where the battery ends up Saturday night; pass 2 is the real result
+    first = run_minutes(inputs, controller, battery_soc_init=BATT_SOC_MIN)
     start_soc = float(first["battery_soc_percent"].iloc[-1])
-    return run_day(inputs, controller, ev_soc_init=EV_WEEK_SOC_INIT, battery_soc_init=start_soc)
+    return run_minutes(inputs, controller, battery_soc_init=start_soc)
 
+
+# ── Results ───────────────────────────────────────────────────────────────────
 
 def summarize_week(results: pd.DataFrame, controller: str) -> dict:
-    kwh = lambda column: float(results[column].sum() / 60.0)
-    returned = results.index[~results["ev_plugged"]]
-    after_trip = results.loc[returned[-1]:] if len(returned) else results
-    recharged = after_trip[after_trip["ev_soc_percent"] >= EV_SOC_TARGET * 100.0 - 1e-6]
-    pv_kwh, sell_kwh = kwh("pv_kw"), kwh("grid_sell_kw")
+    """Week totals for one mode: the numbers in the terminal table and summary.csv."""
+    kwh = lambda column: float(results[column].sum() / 60.0)   # kW each minute → kWh
+    # SOC as each delivery leaves (the minute before it unplugs)
+    plugged = results["ev_plugged"].astype(bool).to_numpy()
+    departures = results["ev_soc_percent"].iloc[np.flatnonzero(plugged[:-1] & ~plugged[1:])]
+    charging = (results["ev_kw"] > 0).to_numpy()   # for charger starts (off → on only, not level changes)
     load_kwh = kwh("cooler_kw") + kwh("other_load_kw") + kwh("ev_kw")
     return {
         "controller": controller,
-        "start": results.index[0].date().isoformat(),
-        "end": results.index[-1].date().isoformat(),
-        "pv_kwh": pv_kwh,
-        "pv_used_on_site_kwh": pv_kwh - sell_kwh,
-        "cooler_kwh": kwh("cooler_kw"),
-        "other_load_kwh": kwh("other_load_kw"),
-        "cooler_unsafe_minutes": int(
-            ((results["cooler_temp_f"] < TMIN) | (results["cooler_temp_f"] > TMAX)).sum()
-        ),
-        "ev_kwh": kwh("ev_kw"),
-        "ev_back_to_target_at": (
-            None if recharged.empty else recharged.index[0].strftime("%a %m/%d %H:%M")
-        ),
-        "ev_final_soc_percent": float(results["ev_soc_percent"].iloc[-1]),
-        "battery_start_soc_percent": float(results["battery_soc_percent"].iloc[0]),
-        "battery_final_soc_percent": float(results["battery_soc_percent"].iloc[-1]),
-        "battery_charged_kwh": float(results["battery_kw"].clip(lower=0).sum() / 60.0),
-        "battery_grid_charged_kwh": kwh("battery_grid_charge_kw"),
-        "battery_discharged_kwh": float(-results["battery_kw"].clip(upper=0).sum() / 60.0),
         "grid_buy_kwh": kwh("grid_buy_kw"),
-        "grid_sell_kwh": sell_kwh,
-        "self_sufficiency_percent": 100.0 * (1 - kwh("grid_buy_kw") / load_kwh) if load_kwh else None,
+        "grid_sell_kwh": kwh("grid_sell_kw"),
+        # CO2 = grid bought each minute × that minute's grid CO2 rate; selling earns no credit
         "grid_emissions_lb": float(
             (results["grid_buy_kw"] * results["moer_lb_per_mwh"]).sum() / 60.0 / 1000.0
+        ),
+        # share of farm load NOT bought from the grid
+        "self_sufficiency_percent": 100.0 * (1 - kwh("grid_buy_kw") / load_kwh),
+        "cooler_kwh": kwh("cooler_kw"),
+        "ev_kwh": kwh("ev_kw"),
+        "ev_charger_starts": int((charging[1:] & ~charging[:-1]).sum() + charging[0]),
+        "ev_soc_at_departures": " / ".join(f"{t:%a} {soc:.1f}%" for t, soc in departures.items()),
+        "ev_lowest_departure_soc_percent": float(departures.min()),
+        "ev_final_soc_percent": float(results["ev_soc_percent"].iloc[-1]),
+        "cooler_unsafe_minutes": int(
+            ((results["cooler_temp_f"] < TMIN) | (results["cooler_temp_f"] > TMAX)).sum()
         ),
     }
 
 
-def daily_totals(results: pd.DataFrame, controller: str) -> pd.DataFrame:
-    per_minute = results.assign(
-        grid_emissions_lb=results["grid_buy_kw"] * results["moer_lb_per_mwh"] / 1000.0,
-        pv_used_kw=results["pv_kw"] - results["grid_sell_kw"],
-        battery_charge_kw=results["battery_kw"].clip(lower=0),
-        battery_discharge_kw=-results["battery_kw"].clip(upper=0),
-    )
-    columns = [
-        "pv_kw", "pv_used_kw", "cooler_kw", "other_load_kw", "ev_kw", "battery_charge_kw",
-        "battery_grid_charge_kw", "battery_discharge_kw", "grid_buy_kw",
-        "grid_sell_kw", "grid_emissions_lb",
-    ]
-    daily = per_minute[columns].resample("D").sum() / 60.0
-    daily.columns = [c.replace("_kw", "_kwh") for c in columns]
-    daily.insert(0, "controller", controller)
-    daily.index = daily.index.strftime("%a %m/%d")
-    return daily
-
-
-def run_week_scenario(
-    pv_xlsx: Path,
-    moer_csv: Path,
-    outdoor_csv: Path,
-    output_dir: Path,
-    show_plot: bool = False,
-) -> pd.DataFrame:
-    inputs = week_inputs(pv_xlsx, moer_csv, outdoor_csv)
-    label = f"week-{inputs.index[0].date().isoformat()}_{site_label()}"
-    week_dir = output_dir / label
-    week_dir.mkdir(parents=True, exist_ok=True)
-
-    results_by_controller: dict[str, pd.DataFrame] = {}
-    summaries, dailies = [], []
-    for controller in CONTROLLERS:
-        results = run_week(inputs, controller)
-        results_by_controller[controller] = results
-        summaries.append(summarize_week(results, controller))
-        dailies.append(daily_totals(results, controller))
-        results.to_csv(week_dir / f"{controller}_minutes.csv")
-
-    summary = pd.DataFrame(summaries)
-    summary.to_csv(week_dir / "summary.csv", index=False)
-    daily = pd.concat(dailies)
-    daily.to_csv(week_dir / "daily.csv")
-
-    filled_hours = inputs["moer_filled"].sum() / 60.0
-    _plot_week_timeline(label, inputs, results_by_controller, week_dir / "timeline.png", show_plot)
-    _plot_week_daily(label, daily, week_dir / "daily.png", show_plot)
-    _print_week(label, summary, filled_hours)
-    print(f"Outputs: {week_dir.resolve()}\n")
-    return summary
-
-
-def _print_week(label: str, summary: pd.DataFrame, filled_hours: float) -> None:
+def print_week(label: str, summary: pd.DataFrame, filled_hours: float) -> None:
+    """Results table in the terminal."""
     print(
-        f"{label} (Sol-Ark PV + WattTime MOER, EV trip Wed "
-        f"{EV_TRIP_START_HOUR}:00–{EV_TRIP_END_HOUR}:00)"
+        f"{label}: truck limit {EV_SOC_TARGET:.0%}, deliveries Tue/Thu using {EV_TRIP_SOC_USED:.0%} each, "
+        f"Binary {BINARY_AMPS} A, Staged {'/'.join(map(str, STAGED_AMPS))} A"
+        + (", battery before truck" if BATTERY_BEFORE_TRUCK else "")
     )
     if filled_hours:
         print(f"  note: {filled_hours:.1f} h of MOER filled from the week before")
     header = (
-        f"{'Controller':<12}{'Grid buy':>10}{'Grid sell':>11}{'Grid CO2 lb':>13}"
-        f"{'Self-suff.':>12}{'EV kWh':>9}{'EV back to 95%':>17}{'Batt in/out kWh':>17}{'Unsafe min':>12}"
+        f"{'Mode':<12}{'Grid buy':>10}{'Grid sell':>11}{'CO2 lb':>8}{'Self-suff.':>12}"
+        f"{'EV kWh':>9}{'EV starts':>11}{'Lowest SOC leaving':>20}{'Unsafe min':>12}"
     )
     print(header)
     print("-" * len(header))
     for row in summary.itertuples():
         print(
             f"{CONTROLLER_LABELS[row.controller]:<12}{row.grid_buy_kwh:>10.1f}{row.grid_sell_kwh:>11.1f}"
-            f"{row.grid_emissions_lb:>13.1f}{row.self_sufficiency_percent:>11.0f}%{row.ev_kwh:>9.1f}"
-            f"{row.ev_back_to_target_at or 'not reached':>17}"
-            f"{row.battery_charged_kwh:>9.1f}/{row.battery_discharged_kwh:<7.1f}"
+            f"{row.grid_emissions_lb:>8.1f}{row.self_sufficiency_percent:>11.0f}%{row.ev_kwh:>9.1f}"
+            f"{row.ev_charger_starts:>11}{row.ev_lowest_departure_soc_percent:>19.1f}%"
             f"{row.cooler_unsafe_minutes:>12}"
         )
 
 
-def _day_axis(ax, index: pd.DatetimeIndex) -> None:
-    days = pd.date_range(index[0].normalize(), index[-1].normalize(), freq="D")
-    ax.set_xticks(days + pd.Timedelta(hours=12), [d.strftime("%a %m/%d") for d in days])
-    for day in days[1:]:
-        ax.axvline(day, color="gray", linewidth=0.6, alpha=0.5)
+def plot_mode(label: str, controller: str, results: pd.DataFrame, output_path: Path):
+    """One window per mode: truck SOC (top) and grid buy (bottom) over the week."""
+    fig, (soc_ax, grid_ax) = plt.subplots(2, 1, figsize=(14, 7), sharex=True)
+    fig.suptitle(f"{CONTROLLER_LABELS[controller]} — {label}")
 
-
-def _shade(ax, index: pd.DatetimeIndex, mask: pd.Series, color: str, label: str) -> None:
-    runs = (mask != mask.shift()).cumsum()[mask]
-    for i, (_, run) in enumerate(runs.groupby(runs)):
-        ax.axvspan(run.index[0], run.index[-1], color=color, alpha=0.15,
-                   label=label if i == 0 else None)
-
-
-def _plot_week_timeline(
-    label: str,
-    inputs: pd.DataFrame,
-    results_by_controller: dict[str, pd.DataFrame],
-    output_path: Path,
-    show_plot: bool,
-) -> None:
-    rows = (
-        ("ev_soc_percent", "EV SoC (%)"),
-        ("cooler_temp_f", "Cooler (°F)"),
-        ("battery_soc_percent", "Battery SoC (%)"),
-        ("grid_buy_kw", "Grid buy (kW)"),
-    )
-    fig, axes = plt.subplots(len(rows) + 1, 1, figsize=(18, 16), sharex=True)
-    fig.suptitle(f"Campus Farm EMS — {label}", fontsize=13)
-    away = ~next(iter(results_by_controller.values()))["ev_plugged"].astype(bool)
-
-    ax = axes[0]
-    ax.plot(inputs.index, inputs["pv_kw"], color="orange", linewidth=0.8, label="PV (kW)")
-    ax.set_ylabel("PV (kW)")
-    moer_ax = ax.twinx()
-    moer_ax.plot(inputs.index, inputs["moer_lb_per_mwh"], color="gray", linewidth=0.6,
-                 alpha=0.7, label="MOER (lb/MWh)")
-    moer_ax.axhline(CO2_THRESHOLD, color="gray", linestyle=":", linewidth=0.8)
-    moer_ax.set_ylabel("MOER (lb/MWh)")
-    if inputs["moer_filled"].any():
-        _shade(ax, inputs.index, inputs["moer_filled"], "red", "MOER filled from week before")
-    handles = ax.get_legend_handles_labels()[0] + moer_ax.get_legend_handles_labels()[0]
-    ax.legend(handles=handles, fontsize=8, loc="upper left")
-    ax.grid(True, alpha=0.3)
-
-    for row, (column, ylabel) in enumerate(rows, start=1):
-        ax = axes[row]
-        for controller, results in results_by_controller.items():
-            ax.plot(results.index, results[column], color=CONTROLLER_COLORS[controller],
-                    label=CONTROLLER_LABELS[controller], linewidth=0.8, alpha=0.85)
-        _shade(ax, inputs.index, away, "purple", "EV away (Wed trip)")
-        if column == "cooler_temp_f":
-            ax.axhspan(TMIN, TMAX, color="green", alpha=0.05)
-        ax.set_ylabel(ylabel)
-        ax.legend(fontsize=8, loc="upper right")
+    # shade deliveries on both charts
+    away = ~results["ev_plugged"].astype(bool)
+    runs = (away != away.shift()).cumsum()[away]
+    for ax in (soc_ax, grid_ax):
+        for i, (_, run) in enumerate(runs.groupby(runs)):
+            ax.axvspan(run.index[0], run.index[-1], color="purple", alpha=0.12,
+                       label="Delivery (unplugged)" if i == 0 else None)
         ax.grid(True, alpha=0.3)
 
-    _day_axis(axes[-1], inputs.index)
-    plt.tight_layout()
+    soc_ax.plot(results.index, results["ev_soc_percent"], color="green", label="Truck SOC")
+    soc_ax.axhline(EV_SOC_TARGET * 100, color="gray", linestyle="--", linewidth=0.8,
+                   label=f"Limit {EV_SOC_TARGET:.0%}")
+    soc_ax.set_ylabel("Truck SOC (%)")
+    soc_ax.legend(loc="lower left", fontsize=8)
+
+    grid_ax.plot(results.index, results["grid_buy_kw"], color="dimgray", linewidth=0.8, label="Grid buy")
+    grid_ax.set_ylabel("Grid buy (kW)")
+    grid_ax.legend(loc="upper left", fontsize=8)
+
+    days = pd.date_range(results.index[0].normalize(), results.index[-1].normalize(), freq="D")
+    grid_ax.set_xticks(days + pd.Timedelta(hours=12), [d.strftime("%a %m/%d") for d in days])
+    fig.tight_layout()
     fig.savefig(output_path, dpi=120)
+    return fig
+
+
+def run_week_scenario(pv_xlsx: Path, moer_csv: Path, outdoor_csv: Path,
+                      output_dir: Path, show_plot: bool = False) -> pd.DataFrame:
+    """Run all three modes on one week; save CSVs and charts to output_dir/week-<date>/."""
+    inputs = week_inputs(pv_xlsx, moer_csv, outdoor_csv)
+    label = f"week-{inputs.index[0].date().isoformat()}" + ("_battery-first" if BATTERY_BEFORE_TRUCK else "")
+    week_dir = output_dir / label
+    week_dir.mkdir(parents=True, exist_ok=True)
+
+    summaries = []
+    for controller in CONTROLLERS:
+        results = run_week(inputs, controller)
+        summaries.append(summarize_week(results, controller))
+        results.to_csv(week_dir / f"{controller}_minutes.csv")
+        fig = plot_mode(label, controller, results, week_dir / f"{controller}.png")
+        if not show_plot:
+            plt.close(fig)
+
+    summary = pd.DataFrame(summaries)
+    summary.to_csv(week_dir / "summary.csv", index=False)
+    print_week(label, summary, inputs["moer_filled"].sum() / 60.0)
+    print(f"Outputs: {week_dir.resolve()}\n")
     if show_plot:
-        plt.show()
-    plt.close(fig)
+        plt.show()   # one window per mode
+    return summary
 
 
-def _plot_week_daily(label: str, daily: pd.DataFrame, output_path: Path, show_plot: bool) -> None:
-    panels = (
-        ("grid_buy_kwh", "Grid buy (kWh)"),
-        ("grid_emissions_lb", "Grid CO₂ (lb)"),
-        ("pv_used_kwh", "Solar used on site (kWh)"),
-        ("battery_discharge_kwh", "Battery discharged (kWh)"),
-    )
-    days = list(dict.fromkeys(daily.index))
-    controllers = list(dict.fromkeys(daily["controller"]))
-    width = 0.8 / len(controllers)
-    x = np.arange(len(days))
-
-    fig, axes = plt.subplots(len(panels), 1, figsize=(14, 13), sharex=True)
-    fig.suptitle(f"Campus Farm EMS — {label}, daily totals", fontsize=13)
-    for ax, (column, ylabel) in zip(axes, panels):
-        for i, controller in enumerate(controllers):
-            values = daily[daily["controller"] == controller][column].reindex(days)
-            ax.bar(x + (i - (len(controllers) - 1) / 2) * width, values, width,
-                   color=CONTROLLER_COLORS[controller], label=CONTROLLER_LABELS[controller])
-        ax.set_ylabel(ylabel)
-        ax.grid(True, axis="y", alpha=0.3)
-        ax.legend(fontsize=8, loc="upper right")
-    axes[-1].set_xticks(x, days)
-    plt.tight_layout()
-    fig.savefig(output_path, dpi=120)
-    if show_plot:
-        plt.show()
-    plt.close(fig)
-
-
+# ── Command line ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Campus Farm EMS — 1-day simulation")
-    parser.add_argument("--scenario", choices=(*SCENARIOS, "all"),
-                        help="Run a sample-day scenario instead of a single day")
-    parser.add_argument("--week-pv-xlsx", type=Path,
-                        help="Week run: Sol-Ark Operation Data export covering whole days (Sun–Sat)")
-    parser.add_argument("--charger", choices=tuple(CHARGERS), default=CHARGER,
-                        help="EV charger model (default: %(default)s)")
-    parser.add_argument("--batteries", type=int, default=BATT_MODULES,
-                        help="Number of stacked Pytes V5 modules (default: %(default)s)")
-    parser.add_argument("--grid-charge", choices=("on", "off"),
-                        default="on" if BATT_GRID_CHARGE else "off",
-                        help="on = Time of Use Charge checked (grid tops up the battery); "
-                             "off = battery charges from excess PV only (default: %(default)s)")
-    parser.add_argument("--solar-priority", choices=("load-first", "batt-first"), default=SOLAR_PRIORITY,
-                        help="Sol-Ark solar priority: cover loads first, or charge the battery first "
-                             "(default: %(default)s)")
-    parser.add_argument("--battery-first", action="store_true", default=BATTERY_FIRST,
-                        help="Excess PV fills the battery before the EV")
-    parser.add_argument("--tuned", action="store_true",
-                        help="Use the tuned model (inverter losses, battery efficiency, measured EV power, "
-                             "cooler power vs outdoor temperature)")
-    parser.add_argument("--battery-powers-ev", action="store_true", default=BATT_POWERS_EV,
-                        help="Battery covers the EV like any other load (what the real inverter does)")
-    parser.add_argument("--moer-csv", type=Path,
-                        help="Week run: WattTime CSV with point_time (UTC) and value columns")
-    parser.add_argument("--high-pv-xlsx", type=Path, help="Sol-Ark export for the High PV day")
-    parser.add_argument("--typical-pv-xlsx", type=Path, help="Sol-Ark export for the Typical Day")
-    parser.add_argument("--low-pv-xlsx", type=Path, help="Sol-Ark export for the Low PV day")
-    parser.add_argument("--synthetic", action="store_true",
-                        help="Scenarios: use sine-wave PV and synthetic MOER on the sample dates")
+    parser = argparse.ArgumentParser(description="Campus Farm EMS week simulation (No EMS / Binary / Staged)")
+    parser.add_argument("--week-pv-xlsx", type=Path, default=DEFAULT_WEEK_PV,
+                        help="Sol-Ark Operation Data export covering a whole week, Sun–Sat (default: %(default)s)")
+    parser.add_argument("--moer-csv", type=Path, default=DEFAULT_MOER_CSV,
+                        help="WattTime CSV with point_time (UTC) and value columns (default: %(default)s)")
+    parser.add_argument("--outdoor-csv", type=Path, default=DEFAULT_OUTDOOR_CSV,
+                        help="Hourly outdoor temperatures (default: %(default)s)")
+    parser.add_argument("--battery-first", action="store_true",
+                        help="Binary/Staged: excess solar fills the battery before the truck")
     parser.add_argument("--output-dir", type=Path, default=Path("results/integrated_simulation"))
     parser.add_argument("--show-plot", action="store_true")
-    parser.add_argument("--controller", choices=CONTROLLERS, default="with-ems",
-                        help="Single-day run: which controller to use")
-    parser.add_argument("--csv", metavar="PATH", help="CSV with 'Minute' and 'Power' columns")
-    parser.add_argument("--pv-xlsx", metavar="PATH",
-                        help="Sol-Ark one-day Excel export; uses WattTime MOER for that day")
-    parser.add_argument("--moer-source", choices=("historical", "forecast-historical"),
-                        default="historical")
-    parser.add_argument("--watttime-cache-dir", type=Path,
-                        default=Path("results/ev_simulation/cache"),
-                        help="Saved WattTime responses, named <moer-source>_<region>_<date>.json")
-    parser.add_argument("--outdoor-csv", metavar="PATH",
-                        default="core/Data/outdoor_temperatures.csv")
-    parser.add_argument("--date", help="Simulation date (YYYY-MM-DD) when not using --pv-xlsx")
     args = parser.parse_args()
-    CHARGER = args.charger
-    BATT_MODULES = args.batteries
-    BATT_GRID_CHARGE = args.grid_charge == "on"
-    BATTERY_FIRST = args.battery_first
-    SOLAR_PRIORITY = args.solar_priority
-    BATT_POWERS_EV = args.battery_powers_ev
-    use_tuned_model(args.tuned)
-    print(
-        f"Charger: {CHARGERS[CHARGER]['label']} | Battery modules: {BATT_MODULES} | "
-        f"TOU Charge: {'checked (grid allowed)' if BATT_GRID_CHARGE else 'unchecked (PV only)'} | "
-        f"Battery-first: {'yes' if BATTERY_FIRST else 'no'} | Solar priority: {SOLAR_PRIORITY} | "
-        f"Battery powers EV: {'yes' if BATT_POWERS_EV else 'no'} | "
-        f"Model: {'tuned' if MODEL_TUNED else 'original'}"
-    )
+    BATTERY_BEFORE_TRUCK = args.battery_first
 
-    if args.week_pv_xlsx:
-        if args.moer_csv is None:
-            parser.error("--week-pv-xlsx requires --moer-csv")
-        run_week_scenario(
-            args.week_pv_xlsx,
-            args.moer_csv,
-            Path(args.outdoor_csv),
-            args.output_dir,
-            show_plot=args.show_plot,
-        )
-    elif args.scenario:
-        workbooks = {
-            "High PV": args.high_pv_xlsx,
-            "Typical Day": args.typical_pv_xlsx,
-            "Low PV": args.low_pv_xlsx,
-        }
-        scenarios = list(SCENARIOS) if args.scenario == "all" else [args.scenario]
-        needed = {label for name in scenarios for label in SCENARIOS[name][0]}
-        missing = sorted(label for label in needed if workbooks[label] is None)
-        if missing and not args.synthetic:
-            parser.error(
-                f"Missing Sol-Ark workbooks for {', '.join(missing)} "
-                "(pass --high-pv-xlsx/--typical-pv-xlsx/--low-pv-xlsx, or --synthetic)"
-            )
-        for name in scenarios:
-            run_scenario(
-                name,
-                workbooks,
-                args.outdoor_csv,
-                args.output_dir,
-                synthetic=args.synthetic,
-                moer_source=args.moer_source,
-                watttime_cache_dir=args.watttime_cache_dir,
-                show_plot=args.show_plot,
-            )
-    else:
-        simulate(
-            pv_csv_path=args.csv,
-            outdoor_csv_path=args.outdoor_csv,
-            simulation_date=args.date,
-            pv_xlsx_path=args.pv_xlsx,
-            moer_source=args.moer_source,
-            watttime_cache_dir=args.watttime_cache_dir,
-            controller=args.controller,
-        )
+    run_week_scenario(args.week_pv_xlsx, args.moer_csv, args.outdoor_csv,
+                      args.output_dir, show_plot=args.show_plot)

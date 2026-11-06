@@ -6,7 +6,7 @@ battery. The Wednesday EV charge starts when the inverter shows it starting and 
 energy the inverter recorded.
 
 Two versions of the model are compared with the real data:
-  original  the model as used in the option comparisons
+  original  the model before tuning
   tuned     plus the "match the real farm" adjustments fitted to the inverter data
             (inverter losses, battery charging efficiency, measured EV draw, cooler power
             rising with outdoor temperature). The loads are still calculated by the model
@@ -19,7 +19,7 @@ Saves to results/integrated_simulation/validation/:
   daily_comparison.csv              real vs original vs tuned daily totals
   V1_daily_real_vs_model.png        daily grid buy, grid sell, battery charge / discharge
   V2_hourly_profile.png             average day, hour by hour (EV day excluded)
-  V3_battery_soc_real_vs_model.png  battery charge Mon–Wed 9/21–9/23, same window as compare chart 4
+  V3_battery_soc_real_vs_model.png  battery charge Mon–Wed 9/21–9/23
 
 With --battery-powers-ev the tuned model also lets the battery cover the EV after 7 PM, like
 the real inverter did on the EV days (the team treats that as a mistake to fix at the farm),
@@ -39,16 +39,30 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-import compare_options as co
 import simulation as sim
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
+DATA = Path("core/Data")
+MOER = DATA / "watttime_MISO_DETROIT_2026-09-13_to_09-26_utc.csv"
+OUTDOOR = DATA / "outdoor_temperatures_2026-09-12_to_09-27.csv"
+WEEKS = {
+    "9/20": DATA / "PV_2026-09-20_to_2026-09-27.xlsx",
+    "9/13": DATA / "PV_2026-09-13_to_2026-09-20.xlsx",
+}
 OUT = Path("results/integrated_simulation/validation")
+
+# Reference palette (dataviz skill), light mode
+SURFACE = "#fcfcfb"
+TEXT = "#0b0b0b"
+TEXT_2 = "#52514e"
+GRID = "#e4e3df"
+SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
+NEUTRAL = "#a8a7a2"
 WEEK = "9/20"
 # EV charging seen on the inverter: start hour, kWh (load above the hour before it, summed)
 REAL_TRIPS = {"9/13": (15 + 20 / 60, 80.2), "9/20": (16.0, 43.6)}
-REAL_COLOR, ORIGINAL_COLOR, TUNED_COLOR = co.TEXT_2, co.NEUTRAL, co.SERIES[0]
+REAL_COLOR, ORIGINAL_COLOR, TUNED_COLOR = TEXT_2, NEUTRAL, SERIES[0]
 SOURCES = {"real": ("Real (inverter)", REAL_COLOR),
            "original": ("Original model", ORIGINAL_COLOR),
            "tuned": ("Tuned model", TUNED_COLOR)}
@@ -56,22 +70,101 @@ SOURCES = {"real": ("Real (inverter)", REAL_COLOR),
 # Only with --battery-powers-ev: the car slows down near full, so it is still charging after
 # 7 PM when the battery may discharge. Measured on 9/16 and 9/23: ~5.7 kWh over ~75–80 min.
 EV_TAPER_KWH = 5.7
-DEFAULTS = {name: getattr(sim, name) for name in ["BATT_POWERS_EV", "EV_TAPER_KWH"]}
+EV_TAPER_END_KW = 1.7
+
+# The model before tuning, for the "original" bars. The tuned values are simulation.py's own.
+ORIGINAL = {
+    "INVERTER_STANDBY_KW": 0.0,
+    "INVERTER_STANDBY_DAY_KW": 0.0,
+    "INVERTER_PV_LOSS": 0.0,
+    "BATT_CHARGE_EFF": 1.0,
+    "BATT_DISCHARGE_EFF": 1.0,
+    "EV_CHARGER_KW": sim.OPENEVSE_MAX_A * sim.OPENEVSE_VOLTS / 1000,   # charger maximum, 11.52 kW
+    "COOLER_ELECTRIC_KW": 0.24,
+    "COOLER_ELECTRIC_KW_PER_F": 0.0,
+}
+TUNED = {name: getattr(sim, name) for name in ORIGINAL}
+
+
+def style(ax) -> None:
+    ax.set_facecolor(SURFACE)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(GRID)
+    ax.tick_params(colors=TEXT_2, labelsize=10)
+    ax.yaxis.label.set_color(TEXT_2)
+    ax.xaxis.label.set_color(TEXT_2)
+    ax.grid(True, axis="y", color=GRID, linewidth=0.8)
+    ax.set_axisbelow(True)
+
+
+def new_figure(width: float, height: float, title: str, subtitle: str):
+    fig = plt.figure(figsize=(width, height), facecolor=SURFACE)
+    fig.text(0.01, 0.97, title, fontsize=15, fontweight="bold", color=TEXT, va="top")
+    fig.text(0.01, 0.915, subtitle, fontsize=10.5, color=TEXT_2, va="top")
+    return fig
+
+
+# ── How the farm ran in September (simulation.py only models the farm as it runs now) ──
+
+class SeptemberBattery(sim.Battery):
+    """Batt First: solar charges the battery before the loads. With powers_ev, the battery
+    also covers the truck after 7 PM, like the real inverter did."""
+    powers_ev = False
+
+    def dispatch(self, pv_kw, cooler_kw, ev_kw, hour, dt_hours=1.0 / 60.0, other_kw=0.0):
+        max_discharge_kw, slot_soc = self.tou_slot(hour)
+        site_kw = cooler_kw + other_kw
+        site_surplus = pv_kw - site_kw
+        floor = max(self.soc_min, slot_soc)
+        can_discharge = max_discharge_kw > 0 and self.soc > floor + 1e-9
+        battery_loads_kw = site_kw + (ev_kw if self.powers_ev else 0.0)
+        if not (can_discharge and pv_kw < battery_loads_kw):
+            # battery before every load, except when it may discharge and PV can't cover the
+            # loads (e.g. dusk): then PV goes to the loads and the battery covers the rest
+            pv_for_battery = max(0.0, pv_kw)
+        else:
+            pv_for_battery = max(0.0, site_surplus - ev_kw)
+        pv_charge = min(pv_for_battery, self.charge_acceptance_kw(dt_hours))
+        self.charge(pv_charge, dt_hours)
+        surplus_kw = site_surplus - ev_kw - pv_charge
+        grid_sell = max(0.0, surplus_kw)
+        grid_buy = max(0.0, -surplus_kw)
+        discharge_kw = 0.0
+        if surplus_kw < 0 and pv_charge == 0.0:
+            site_deficit = max(0.0, battery_loads_kw - pv_kw)
+            available_kw = max(0.0, self._soc_to_kw(self.soc - floor, dt_hours) * sim.BATT_DISCHARGE_EFF)
+            discharge_kw = min(site_deficit, max_discharge_kw, self.max_discharge_power, available_kw)
+            self.discharge(discharge_kw, dt_hours)
+            grid_buy -= discharge_kw
+        return pv_charge - discharge_kw, grid_sell, grid_buy
+
+
+class TaperEV(sim.SimEV):
+    """Truck that slows down near full: over the last taper_kwh before the limit, power falls
+    with the energy still needed, down to EV_TAPER_END_KW. 0 = no taper."""
+    taper_kwh = 0.0
+
+    def charge(self, power_kw=None, dt_hours=1.0 / 60.0):
+        if self.taper_kwh > 0.0:
+            remaining_kwh = max(0.0, self.target - self.soc) * self.capacity / self.eff
+            if remaining_kwh < self.taper_kwh:
+                taper_kw = max(EV_TAPER_END_KW, self.rate * remaining_kwh / self.taper_kwh)
+                power_kw = min(self.rate if power_kw is None else power_kw, taper_kw)
+        super().charge(power_kw, dt_hours)
 
 
 def configure_farm(tuned: bool, battery_powers_ev: bool = False) -> None:
-    sim.CHARGER = "openevse-5-6a"   # No EMS always charges at full power, so the levels don't matter
-    sim.BATT_MODULES = 1
-    sim.BATT_GRID_CHARGE = False
-    sim.BATTERY_FIRST = False
-    sim.SOLAR_PRIORITY = "batt-first"
-    for name, value in DEFAULTS.items():
+    # Batt First, the truck charged to 95% and made one Wednesday trip
+    # (run_model sets the trip's energy from the measured charge)
+    sim.Battery, sim.SimEV = SeptemberBattery, TaperEV
+    sim.EV_SOC_TARGET = 0.95
+    sim.EV_TRIP_WEEKDAYS = (2,)
+    for name, value in (TUNED if tuned else ORIGINAL).items():
         setattr(sim, name, value)
-    sim.use_tuned_model(tuned)   # values and where they come from: simulation.TUNED_SETTINGS
-    if tuned:
-        sim.BATT_POWERS_EV = battery_powers_ev
-        if battery_powers_ev:
-            sim.EV_TAPER_KWH = EV_TAPER_KWH
+    SeptemberBattery.powers_ev = tuned and battery_powers_ev
+    TaperEV.taper_kwh = EV_TAPER_KWH if tuned and battery_powers_ev else 0.0
 
 
 def load_real(path: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -128,15 +221,11 @@ def model_power(r: pd.DataFrame) -> pd.DataFrame:
 
 def run_model(week: str) -> pd.DataFrame:
     """No EMS week with the EV plug-in time and energy matched to the inverter data."""
-    saved = sim.EV_TRIP_END_HOUR, sim.EV_TRIP_RETURN_SOC
     end_hour, kwh = REAL_TRIPS[week]
     sim.EV_TRIP_END_HOUR = end_hour
-    sim.EV_TRIP_RETURN_SOC = sim.EV_SOC_TARGET - kwh * sim.EV_CHARGE_EFF / sim.EV_CAPACITY
-    try:
-        inputs = sim.week_inputs(co.WEEKS[week], co.MOER, co.OUTDOOR)
-        return sim.run_week(inputs, "without-ems")
-    finally:
-        sim.EV_TRIP_END_HOUR, sim.EV_TRIP_RETURN_SOC = saved
+    sim.EV_TRIP_SOC_USED = kwh * sim.EV_CHARGE_EFF / sim.EV_CAPACITY   # trip uses what was recharged
+    inputs = sim.week_inputs(WEEKS[week], MOER, OUTDOOR)
+    return sim.run_week(inputs, "without-ems")
 
 
 def main() -> None:
@@ -149,7 +238,7 @@ def main() -> None:
         OUT = OUT / "battery_powers_ev"
         SOURCES["tuned"] = ("Tuned model, battery powers EV + EV taper", TUNED_COLOR)
     OUT.mkdir(parents=True, exist_ok=True)
-    real = {week: load_real(path) for week, path in co.WEEKS.items()}
+    real = {week: load_real(path) for week, path in WEEKS.items()}
 
     runs = {}
     for name in ("original", "tuned"):
@@ -188,65 +277,73 @@ def main() -> None:
     # ── V1: daily bars ──
     panels = [("load", "Load"), ("grid buy", "Grid buy"), ("grid sell", "Grid sell"),
               ("battery charge", "Battery charged"), ("battery discharge", "Battery discharged")]
-    fig = co.new_figure(16, 12.5, f"Model vs real inverter data, day by day (week of {WEEK})",
+    if args.battery_powers_ev:
+        # battery charged doesn't depend on the battery powering the EV; dates under every panel
+        panels.remove(("battery charge", "Battery charged"))
+    fig = new_figure(16, 12.5, f"Model vs real inverter data, day by day (week of {WEEK})",
                         "Farm settings: No EMS, 1 battery, Batt First, battery charged from solar only · "
                         "real = Sol-Ark daily counters · EV charging matched to the real Wednesday")
     x = np.arange(len(daily))
     labels = [d.strftime("%a\n%-m/%-d") for d in daily.index]
     width = 0.27
     for i, (metric, title) in enumerate(panels):
-        ax = fig.add_axes([0.05, 0.75 - i * 0.172, 0.93, 0.125])
-        co.style(ax)
+        if args.battery_powers_ev:
+            ax = fig.add_axes([0.05, 0.7 - i * 0.205, 0.93, 0.125])
+        else:
+            ax = fig.add_axes([0.05, 0.725 - i * 0.167, 0.93, 0.12])
+        style(ax)
         for j, (src, (label, color)) in enumerate(SOURCES.items()):
             ax.bar(x + (j - 1) * width, daily[(src, metric)], width * 0.92, color=color, label=label)
-        ax.set_title(title + " (kWh/day)", fontsize=11.5, color=co.TEXT, loc="left")
-        ax.set_xticks(x, labels if i == len(panels) - 1 else [""] * len(x), fontsize=9)
+        ax.set_title(title + " (kWh/day)", fontsize=11.5, color=TEXT, loc="left")
+        show_dates = args.battery_powers_ev or i == len(panels) - 1
+        ax.set_xticks(x, labels if show_dates else [""] * len(x), fontsize=9)
         if metric in ("grid buy", "load"):
             ax.set_yscale("symlog", linthresh=10)
             ax.set_yticks([0, 2, 5, 10, 50], ["0", "2", "5", "10", "50"])
         if i == 0:
-            ax.legend(loc="upper right", frameon=False, fontsize=10, labelcolor=co.TEXT, ncol=3)
+            ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.02), frameon=False, fontsize=10,
+                      labelcolor=TEXT, ncol=3)
     fig.text(0.05, 0.012, "Load and grid buy are on a stretched scale so the normal days stay visible next to the "
              "EV-charging Wednesday (≈40–60 kWh). Load = cooler + wifi/electronics + EV, without inverter losses.",
-             fontsize=9, color=co.TEXT_2)
-    fig.savefig(OUT / "V1_daily_real_vs_model.png", dpi=160, facecolor=co.SURFACE)
+             fontsize=9, color=TEXT_2)
+    fig.savefig(OUT / "V1_daily_real_vs_model.png", dpi=160, facecolor=SURFACE)
     plt.close(fig)
 
     # ── V2: average hourly profile on normal days ──
     hourly = {src: normal_days(p).groupby(normal_days(p).index.hour).mean() for src, p in powers.items()}
     rows = [("load", "Load"), ("grid import", "Grid import"), ("grid export", "Grid export"),
             ("battery charging", "Battery charging"), ("battery discharging", "Battery discharging")]
-    fig = co.new_figure(16, 11, "Model vs real: an average normal day, hour by hour",
+    fig = new_figure(16, 11, "Model vs real: an average normal day, hour by hour",
                         f"Average power (kW) for each hour, week of {WEEK} without the EV day "
                         "(Wed/Thu excluded) · Farm settings: No EMS, 1 battery, Batt First")
     for i, (metric, title) in enumerate(rows):
         ax = fig.add_axes([0.05 + (i % 2) * 0.48, 0.62 - (i // 2) * 0.29, 0.44, 0.22])
-        co.style(ax)
+        style(ax)
         for src, (label, color) in SOURCES.items():
             ax.plot(hourly[src].index, hourly[src][metric], color=color, linewidth=2.5 if src == "real" else 2,
                     marker="o", markersize=4, label=label)
-        ax.set_title(f"{title} (kW)", fontsize=11.5, color=co.TEXT, loc="left")
+        ax.set_title(f"{title} (kW)", fontsize=11.5, color=TEXT, loc="left")
         ax.set_xticks(range(0, 24, 3), [pd.Timestamp(2026, 1, 1, h).strftime("%-I %p") for h in range(0, 24, 3)])
         ax.set_ylim(0, None)
         if i == 0:
-            ax.legend(loc="lower center", frameon=False, fontsize=10, labelcolor=co.TEXT, ncol=3)
-    fig.savefig(OUT / "V2_hourly_profile.png", dpi=160, facecolor=co.SURFACE)
+            ax.legend(loc="lower center", frameon=False, fontsize=10, labelcolor=TEXT, ncol=3)
+    fig.savefig(OUT / "V2_hourly_profile.png", dpi=160, facecolor=SURFACE)
     plt.close(fig)
 
-    # ── V3: battery charge, same window as compare_options chart 4 ──
-    # Mon–Wed like compare chart 4; with --battery-powers-ev through Thu morning to show the EV evening
+    # ── V3: battery charge ──
+    # Mon–Wed; with --battery-powers-ev through Thu morning to show the EV evening
     start = pd.Timestamp("2026-09-21 00:00")
     end = pd.Timestamp("2026-09-24 09:00" if args.battery_powers_ev else "2026-09-23 09:00")
-    fig = co.new_figure(13, 5.4, f"Battery charge Mon–{end:%a}: model vs real inverter data",
+    fig = new_figure(13, 5.4, f"Battery charge Mon–{end:%a}: model vs real inverter data",
                         "Farm settings: No EMS, 1 battery, Batt First · shaded = 9 AM–7 PM (battery held, no discharge)")
     ax = fig.add_axes([0.06, 0.12, 0.92, 0.68])
-    co.style(ax)
-    ax.grid(True, axis="x", color=co.GRID, linewidth=0.5)
+    style(ax)
+    ax.grid(True, axis="x", color=GRID, linewidth=0.5)
     ax.set_xlim(start, end)
     for day in pd.date_range(start.normalize(), end, freq="D"):
-        ax.axvspan(day + pd.Timedelta(hours=9), day + pd.Timedelta(hours=19), color=co.GRID, alpha=0.45, linewidth=0)
-    ax.axhline(sim.BATT_SOC_MIN, color=co.NEUTRAL, linewidth=1, linestyle="--")
-    ax.text(start + pd.Timedelta(hours=1), sim.BATT_SOC_MIN + 2, f"{sim.BATT_SOC_MIN}% minimum", fontsize=9, color=co.TEXT_2)
+        ax.axvspan(day + pd.Timedelta(hours=9), day + pd.Timedelta(hours=19), color=GRID, alpha=0.45, linewidth=0)
+    ax.axhline(sim.BATT_SOC_MIN, color=NEUTRAL, linewidth=1, linestyle="--")
+    ax.text(start + pd.Timedelta(hours=1), sim.BATT_SOC_MIN + 2, f"{sim.BATT_SOC_MIN}% minimum", fontsize=9, color=TEXT_2)
     for src, (label, color) in SOURCES.items():
         ax.plot(powers[src].index, powers[src]["battery soc"], color=color, linewidth=2.5 if src == "real" else 2,
                 label=label)
@@ -254,9 +351,9 @@ def main() -> None:
     ax.set_ylim(0, 105)
     ticks = pd.date_range(start, end, freq="6h")
     ax.set_xticks(ticks, [t.strftime("%a %-I %p") for t in ticks], fontsize=9)
-    ax.legend(loc="lower center", ncol=3, frameon=True, facecolor=co.SURFACE, edgecolor=co.GRID,
-              fontsize=9.5, labelcolor=co.TEXT)
-    fig.savefig(OUT / "V3_battery_soc_real_vs_model.png", dpi=160, facecolor=co.SURFACE)
+    ax.legend(loc="lower center", ncol=3, frameon=True, facecolor=SURFACE, edgecolor=GRID,
+              fontsize=9.5, labelcolor=TEXT)
+    fig.savefig(OUT / "V3_battery_soc_real_vs_model.png", dpi=160, facecolor=SURFACE)
     plt.close(fig)
     print(f"\nSaved to {OUT.resolve()}")
 

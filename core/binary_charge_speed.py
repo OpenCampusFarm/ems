@@ -60,10 +60,9 @@ DAYS = {
     "every-day": (0, 1, 2, 3, 4, 5, 6),
     "fri-mon": (4, 5, 6, 0),            # no charging from Tuesday through Thursday
 }
-# name: (PV multiplier, battery may power the EV)
+# name: (PV multiplier, unused: battery-powers-EV case removed from simulation.py)
 CASES = {
     "september": (1.0, False),
-    "september-batt-to-ev": (1.0, True),
     "low-pv-40pct": (0.4, False),       # rough late-fall stress test, not measured data
 }
 WEEK_MINUTES = 7 * 24 * 60
@@ -114,18 +113,13 @@ def run(job: tuple) -> dict:
     inputs, case, pv_scale, batt_powers_ev, amps, rule, days = job
     pass_minutes = len(inputs)
     passes = 2 if pass_minutes > WEEK_MINUTES else 4
-    sim.use_tuned_model(True)
-    sim.SOLAR_PRIORITY = "load-first"
-    sim.BATT_POWERS_EV = batt_powers_ev
     sim.SETPOINT_COOLTH = FARM_SETPOINT_CLEAN
     sim.SETPOINT_ECON = FARM_SETPOINT_DIRTY
 
-    cooler = sim.Cooler(electric_kw=sim.COOLER_ELECTRIC_KW,
-                        electric_kw_per_f=sim.COOLER_ELECTRIC_KW_PER_F,
-                        electric_ref_f=sim.COOLER_ELECTRIC_REF_F)
+    cooler = sim.Cooler()
     ev = sim.SimEV(soc_init=EV_SOC_START, charge_rate_kw=sim.EV_CHARGER_KW)
     ev.target = EV_SOC_START
-    battery = sim.Battery(soc_init=50, modules=1)
+    battery = sim.Battery(soc_init=50)
     cooler.ambient = float(inputs["outdoor_f"].iloc[0])
 
     charger_kw = min(amps * sim.OPENEVSE_VOLTS / 1000, ev.rate)
@@ -185,7 +179,7 @@ def run(job: tuple) -> dict:
             else:
                 ev.idle()
 
-        _, sell, buy, _ = battery.dispatch(
+        _, sell, buy = battery.dispatch(
             pv_ac_kw, cooler.instant_power_kw, ev.input_power_kw, int(hour),
             other_kw=other_kw + standby_kw,
         )
@@ -309,7 +303,6 @@ def plot_weather(table: pd.DataFrame, base: pd.DataFrame, out: Path) -> None:
 def weather_test() -> None:
     out = OUT / "weather_test"
     out.mkdir(parents=True, exist_ok=True)
-    sim.use_tuned_model(True)
     source = load_inputs()
     weeks = {name: repeat_days(source, days) for name, days in WEATHER.items()}
     jobs = [(week, name, 1.0, False, 0, "covers-charger", None) for name, week in weeks.items()]
@@ -345,7 +338,6 @@ def main() -> None:
         weather_test()
         return
 
-    sim.use_tuned_model(True)
     if args.pv_xlsx:
         inputs = load_week(args.pv_xlsx, args.outdoor_csv)
         cases = {args.name: (1.0, False)}
