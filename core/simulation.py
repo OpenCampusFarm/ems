@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 
 from ev_real_data_simulation import EV
+import fan_thermal
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 # SOC = state of charge (how full a battery is). MOER = grid CO2 per MWh right now (WattTime).
@@ -42,6 +43,7 @@ SETPOINT_NO_EMS  = 38     # °F — No EMS: the real CoolBot's fixed setpoint
 EV_CAPACITY      = 131.0  # kWh  (F-150 Lightning extended range)
 EV_CHARGE_EFF    = 0.90   # 90% of wall energy ends up in the truck battery
 EV_SOC_TARGET    = 0.80   # truck charge limit
+EV_DEPARTURE_MIN = 0.30
 EV_RESUME_MARGIN = 0.01   # once at the limit, charging restarts only this far below it
 DECISION_MINUTES = 5      # the EMS decides truck charging this often (real_time_ems.py POLL_INTERVAL)
 
@@ -58,9 +60,10 @@ COOLER_ELECTRIC_KW_PER_F = 0.0165   # kW more per °F warmer outside (tuned)
 COOLER_ELECTRIC_REF_F    = 60.0     # °F, reference outdoor temp for the line above
 OTHER_LOAD_KW      = 0.25   # kW, wifi/electronics room and controllers on the load port, always on (lights off)
 
-# Fan (placeholder until the fan team adds its temperature equation, see Cooler._fan_cooling_kw)
-FAN_INSTALLED   = False   # True = Binary/Staged use the fan rules in Cooler.update
-FAN_ELECTRIC_KW = 0.0     # TODO(team): fan power draw
+# Fan model: two 31 W intake fans; 65% effective airflow is an assumption.
+FAN_INSTALLED   = True   # True = Binary/Staged use the fan rules in Cooler.update
+FAN_MIN_ROOM_F = 34.0  # fan_v2 cutoff; independent of the plotted cooler range
+FAN_ELECTRIC_KW = 0.062     # total installed fan electrical draw
 
 # Inverter losses (tuned from the Sol-Ark daily counters)
 INVERTER_STANDBY_KW     = 0.070   # kW, inverter self-use at night (tuned)
@@ -145,7 +148,7 @@ class Cooler:
         setpoint_f: float = SETPOINT_ECON,
         power_kw: float   = 3.67,   # AC cooling power for the temperature model
         cop: float        = 2.0,    # cooling out per unit of electricity
-        ci: float         = 0.2,    # thermal capacitance (how slowly the room changes)
+        ci: float         = fan_thermal.C,    # thermal capacitance (how slowly the room changes)
         cold_capacity_factor: float = 0.75,
         cold_outdoor_f: float = 60.0,
         warm_outdoor_f: float = 70.0,
@@ -162,6 +165,7 @@ class Cooler:
         self.temp     = setpoint_f + 1.0   # indoor temperature, °F
         self._on      = False              # AC running?
         self.fan_on   = False
+        self._compressor_demand = False
 
     def _thermostat(self) -> None:
         # ±1 °F band so the AC doesn't flip on/off every minute
@@ -171,10 +175,8 @@ class Cooler:
             self._on = False
 
     def _effective_ri(self) -> float:
-        # heat leaks in faster (lower resistance) when it is cold outside: 1 at 50 °F → 3 at 70 °F
-        fraction = np.clip((self.outdoor_temp - 50.0) / (70.0 - 50.0), 0.0, 1.0)
-        return 1.0 + fraction * (3.0 - 1.0)
-
+        return fan_thermal.R
+    
     def _capacity_factor(self) -> float:
         # AC cools less well in cold weather: 75% at 60 °F → 100% at 70 °F
         fraction = np.clip(
@@ -184,33 +186,29 @@ class Cooler:
         return self.cold_capacity_factor + fraction * (1.0 - self.cold_capacity_factor)
 
     def _fan_cooling_kw(self) -> float:
-        # TODO(team): fan cooling effect (kW of heat removed) from the fan team's equation.
-        # 0 for now: with the fan "on" and the AC off, the room just drifts toward the outdoor temp.
-        return 0.0
+        h = 1.2 * 1006 / 1000 * (452 * .65) * .00047194745 * 5/9
+        return h * (self.temp - self.outdoor_temp)
 
     def _thermal_step(self) -> None:
-        # one minute of the RC model: temp moves toward (outdoor − cooling effect)
-        alpha = np.exp(-self.dt / (self.ci * self._effective_ri()))
-        cooling_kw = 0.0
-        if self._on:
-            cooling_kw += self.power_kw * self.cop * self._capacity_factor()
-        if self.fan_on:
-            cooling_kw += self._fan_cooling_kw()
-        self.temp = (
-            alpha * self.temp
-            + (1.0 - alpha) * (self.outdoor_temp - self._effective_ri() * cooling_kw)
-        )
+        self.temp = fan_thermal.advance(self.temp, self.outdoor_temp, self._on, self.fan_on, self.dt, self.ci)
 
     def update(self, outdoor_f: float, fan_installed: bool = False) -> None:
         self.outdoor_temp = float(outdoor_f)
-        if fan_installed and self.temp < TMIN:
-            self.fan_on, self._on = False, False     # cold enough: everything off
-        elif fan_installed and self.outdoor_temp < self.temp:
-            self.fan_on, self._on = True, False      # outside is colder: fan instead of AC
-        else:
-            self.fan_on = False
-            self._thermostat()                       # AC follows the setpoint
-        self._thermal_step()
+        initial = self.temp
+        self.passive_slope, self.fan_slope, self.compressor_slope = fan_thermal.slopes(initial, self.outdoor_temp, self.ci)
+        self.fan_duty = self.compressor_duty = 0.0
+        self._on = self._compressor_demand
+        self._thermostat()
+        self._compressor_demand = self._on
+        for _ in range(2):
+            # Exact fan_v2 AUTO condition, evaluated every 30 seconds.
+            self.fan_on = bool(fan_installed and self.temp > FAN_MIN_ROOM_F
+                               and self.outdoor_temp < self.temp)
+            self._on = self._compressor_demand and not self.fan_on
+            self.temp = fan_thermal.advance(self.temp, self.outdoor_temp, self._on, self.fan_on, self.dt/2, self.ci)
+            self.fan_duty += .5 * self.fan_on
+            self.compressor_duty += .5 * self._on
+        self.actual_slope = (self.temp-initial)/self.dt
 
     def change_setpoint(self, sp: float) -> None:
         self.setpoint = sp
@@ -222,7 +220,8 @@ class Cooler:
         if self._on:
             ac_kw = max(0.0, COOLER_ELECTRIC_KW
                         + COOLER_ELECTRIC_KW_PER_F * (self.outdoor_temp - COOLER_ELECTRIC_REF_F))
-        return ac_kw + (FAN_ELECTRIC_KW if self.fan_on else 0.0)
+        ac_kw = max(0.0, COOLER_ELECTRIC_KW + COOLER_ELECTRIC_KW_PER_F * (self.outdoor_temp - COOLER_ELECTRIC_REF_F)) * getattr(self, "compressor_duty", float(self._on))
+        return ac_kw + FAN_ELECTRIC_KW * getattr(self, "fan_duty", 0.0)
 
 
 # ── EV model ──────────────────────────────────────────────────────────────────
@@ -339,8 +338,8 @@ def binary_charger_kw(surplus_kw: float) -> float:
 
 def staged_charger_kw(surplus_kw: float) -> float:
     """Highest staged level the excess solar fully covers (rounded down), otherwise off."""
-    covered = [level for level in STAGED_KW if level <= surplus_kw]   # levels solar can pay for
-    return max(covered) if covered else 0.0                           # e.g. 6 kW excess → 4.8 kW (20 A)
+    covered = [level for level in STAGED_KW if min(level, EV_CHARGER_KW) <= surplus_kw]   # levels solar can pay for
+    return min(max(covered), EV_CHARGER_KW) if covered else 0.0                           # e.g. 6 kW excess → 4.8 kW (20 A)
 
 
 # ── Week inputs ───────────────────────────────────────────────────────────────
@@ -459,6 +458,8 @@ def run_minutes(inputs: pd.DataFrame, controller: str, battery_soc_init: float) 
     departure_soc = None                # truck SOC when the current delivery left
     wants_charge = ev.soc < ev.target   # truck below its limit?
     ems_ev_kw = 0.0                     # last EMS charging decision, held between decisions
+    away_mask = inputs.ev_trip_fraction.notna()
+    departures = inputs.index[away_mask & ~away_mask.shift(fill_value=False)]
     records: list[dict] = []            # one row of results per minute
 
     # ── one loop pass = one minute ──
@@ -480,6 +481,10 @@ def run_minutes(inputs: pd.DataFrame, controller: str, battery_soc_init: float) 
         cooler.update(float(row["outdoor_f"]), fan_installed)
 
         # 3. truck
+        reserve_override = False
+        surplus_kw = pv_ac_kw - cooler.instant_power_kw - other_kw - standby_kw
+        if BATTERY_BEFORE_TRUCK:
+            surplus_kw -= battery.charge_acceptance_kw()
         trip = row["ev_trip_fraction"]
         plugged = pd.isna(trip)
         if not plugged:
@@ -489,6 +494,7 @@ def run_minutes(inputs: pd.DataFrame, controller: str, battery_soc_init: float) 
             ev.soc = departure_soc - EV_TRIP_SOC_USED * float(trip)
             ev.charging = False
             ev.input_power_kw = 0.0
+            ems_ev_kw = 0.0
         else:
             departure_soc = None
             # does the truck need charge? starts below 79%, stops at 80%
@@ -508,6 +514,13 @@ def run_minutes(inputs: pd.DataFrame, controller: str, battery_soc_init: float) 
                     ems_ev_kw = (binary_charger_kw(surplus_kw) if controller == "with-ems"
                                  else staged_charger_kw(surplus_kw))
                 ev_kw = ems_ev_kw                  # between decisions, keep the last one
+            next_i = departures.searchsorted(timestamp, side="right")
+            if next_i < len(departures) and ev.soc < EV_DEPARTURE_MIN:
+                minutes_left = (departures[next_i] - timestamp).total_seconds()/60
+                needed = (EV_DEPARTURE_MIN - ev.soc) * EV_CAPACITY
+                reserve_override = minutes_left <= needed/(ev.rate * EV_CHARGE_EFF)*60 + 2
+            if reserve_override:
+                ev_kw = ev.rate
             ev_kw = min(ev_kw, ev.rate) if wants_charge else 0.0
             ev.charge(ev_kw) if ev_kw > 0.0 else ev.idle()   # one minute of charging (or standing)
 
@@ -531,7 +544,18 @@ def run_minutes(inputs: pd.DataFrame, controller: str, battery_soc_init: float) 
                 "other_load_kw": other_kw,
                 "inverter_loss_kw": standby_kw + pv_kw - pv_ac_kw,
                 "ev_kw": ev.input_power_kw,
+                "ev_effective_amps": ev.input_power_kw * 1000 / OPENEVSE_VOLTS,
                 "ev_plugged": plugged,
+                "ev_surplus_pv_kw": max(0.0, surplus_kw),
+                "ev_reserve_override": reserve_override,
+                "ev_status": ("Away on delivery" if not plugged else "Reserve charging" if reserve_override else "80% limit reached" if not wants_charge else "Charging from surplus PV" if ev.input_power_kw > 0 and controller != "without-ems" else "Uncontrolled charging" if ev.input_power_kw > 0 else "Waiting for solar"),
+                "fan_kw": FAN_ELECTRIC_KW * cooler.fan_duty,
+                "compressor_kw": cooler.instant_power_kw - FAN_ELECTRIC_KW * cooler.fan_duty,
+                "fan_duty": cooler.fan_duty,
+                "compressor_duty": cooler.compressor_duty,
+                "passive_slope_f_per_hour": cooler.passive_slope,
+                "fan_slope_f_per_hour": cooler.fan_slope,
+                "compressor_slope_f_per_hour": cooler.compressor_slope,
                 "ev_soc_percent": ev.soc * 100.0,
                 "battery_kw": batt_power,
                 "battery_soc_percent": battery.soc,
@@ -577,10 +601,21 @@ def summarize_week(results: pd.DataFrame, controller: str) -> dict:
         "self_sufficiency_percent": 100.0 * (1 - kwh("grid_buy_kw") / load_kwh),
         "cooler_kwh": kwh("cooler_kw"),
         "ev_kwh": kwh("ev_kw"),
+        "ev_charging_hours": float((results.ev_kw > 0).sum()/60),
+        "ev_reserve_events": int((results.ev_reserve_override & ~results.ev_reserve_override.shift(fill_value=False)).sum()),
+        "ev_reserve_kwh": float(results.ev_kw.where(results.ev_reserve_override, 0).sum()/60),
+        "ev_min_soc_percent": float(results.ev_soc_percent.min()),
+        "ev_departure_failures": int((departures < EV_DEPARTURE_MIN*100 - 1e-6).sum()),
+        "fan_kwh": kwh("fan_kw"),
+        "compressor_kwh": kwh("compressor_kw"),
         "ev_charger_starts": int((charging[1:] & ~charging[:-1]).sum() + charging[0]),
         "ev_soc_at_departures": " / ".join(f"{t:%a} {soc:.1f}%" for t, soc in departures.items()),
         "ev_lowest_departure_soc_percent": float(departures.min()),
         "ev_final_soc_percent": float(results["ev_soc_percent"].iloc[-1]),
+        "cooler_min_f": float(results.cooler_temp_f.min()),
+        "cooler_max_f": float(results.cooler_temp_f.max()),
+        "cooler_below_40_minutes": int((results.cooler_temp_f < TMIN).sum()),
+        "cooler_above_55_minutes": int((results.cooler_temp_f > TMAX).sum()),
         "cooler_unsafe_minutes": int(
             ((results["cooler_temp_f"] < TMIN) | (results["cooler_temp_f"] > TMAX)).sum()
         ),
@@ -643,24 +678,49 @@ def plot_mode(label: str, controller: str, results: pd.DataFrame, output_path: P
 
 
 def run_week_scenario(pv_xlsx: Path, moer_csv: Path, outdoor_csv: Path,
-                      output_dir: Path, show_plot: bool = False) -> pd.DataFrame:
+                      output_dir: Path, show_plot: bool = False, compare_fan_power: bool = False) -> pd.DataFrame:
     """Run all three modes on one week; save CSVs and charts to output_dir/week-<date>/."""
     inputs = week_inputs(pv_xlsx, moer_csv, outdoor_csv)
     label = f"week-{inputs.index[0].date().isoformat()}" + ("_battery-first" if BATTERY_BEFORE_TRUCK else "")
     week_dir = output_dir / label
     week_dir.mkdir(parents=True, exist_ok=True)
 
+    # Preserve older generated outputs without mixing them with the current five figures.
+    import shutil
+    from datetime import datetime
+    old = [p for p in week_dir.iterdir() if p.is_file() and p.suffix in ('.png', '.csv', '.json')]
+    if old:
+        archive = week_dir / '_previous' / datetime.now().strftime('%Y%m%d_%H%M%S')
+        archive.mkdir(parents=True, exist_ok=True)
+        for p in old:
+            shutil.move(str(p), archive / p.name)
+    data_dir = week_dir / 'data'
+    data_dir.mkdir(exist_ok=True)
+    runs = {}
     summaries = []
     for controller in CONTROLLERS:
         results = run_week(inputs, controller)
+        runs[controller] = results
         summaries.append(summarize_week(results, controller))
-        results.to_csv(week_dir / f"{controller}_minutes.csv")
-        fig = plot_mode(label, controller, results, week_dir / f"{controller}.png")
-        if not show_plot:
-            plt.close(fig)
+        results.to_csv(data_dir / f"{controller}_minutes.csv")
+        from ev_demo_outputs import save_ev_outputs
+        save_ev_outputs(results, controller, data_dir, charts=False)
 
     summary = pd.DataFrame(summaries)
     summary.to_csv(week_dir / "summary.csv", index=False)
+    from integrated_demo_outputs import build_outputs
+    comparison = {}
+    if compare_fan_power:
+        global FAN_INSTALLED
+        original = FAN_INSTALLED
+        try:
+            FAN_INSTALLED = False
+            comparison = {c: run_week(inputs, c) for c in CONTROLLERS if c != "without-ems"}
+            for c, r in comparison.items():
+                r.to_csv(data_dir / f"{c}_fan_off_minutes.csv")
+        finally:
+            FAN_INSTALLED = original
+    build_outputs(inputs, runs, summary, comparison, week_dir, label, str(outdoor_csv), show_plot)
     print_week(label, summary, inputs["moer_filled"].sum() / 60.0)
     print(f"Outputs: {week_dir.resolve()}\n")
     if show_plot:
@@ -680,9 +740,10 @@ if __name__ == "__main__":
     parser.add_argument("--battery-first", action="store_true",
                         help="Binary/Staged: excess solar fills the battery before the truck")
     parser.add_argument("--output-dir", type=Path, default=Path("results/integrated_simulation"))
+    parser.add_argument("--compare-fan-power", action="store_true")
     parser.add_argument("--show-plot", action="store_true")
     args = parser.parse_args()
     BATTERY_BEFORE_TRUCK = args.battery_first
 
     run_week_scenario(args.week_pv_xlsx, args.moer_csv, args.outdoor_csv,
-                      args.output_dir, show_plot=args.show_plot)
+                      args.output_dir, show_plot=args.show_plot, compare_fan_power=args.compare_fan_power)

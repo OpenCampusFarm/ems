@@ -25,7 +25,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import requests
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(*args, **kwargs):
+        return False
 
 
 load_dotenv()
