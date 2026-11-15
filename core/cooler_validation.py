@@ -4,7 +4,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
 
-from simulation import Cooler, ems_setpoint
+from core.simulation_ems import SimCooler, ems_setpoint
 
 # Sine-wave PV and made-up MOER, moved here from simulation.py (it now only runs real weeks)
 PV_MAX_POWER = 13.2   # kW
@@ -419,11 +419,9 @@ outdoor_by_minute = (
     .resample("1min")
     .interpolate(method="time")
 )
-cooler = Cooler(
+cooler = SimCooler(
     outdoor_f=float(outdoor_by_minute.iloc[0]),
-    setpoint_f=SETPOINT,
-    cop = 2,
-    ci = 0.2)
+    setpoint_f=SETPOINT)
 
 
 cooler.temp = 52.8

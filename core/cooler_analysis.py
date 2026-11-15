@@ -45,7 +45,7 @@ TMAX = 55.0
 
 def find_minute_file(directory: Path, controller: str) -> Path:
     """Locate a controller's minute CSV, including the supplied typo."""
-    candidates = [directory / f"{controller}_minutes.csv"]
+    candidates = [directory / "data" / f"{controller}_minutes.csv"]
 
     if controller == "with-ems":
         candidates.append(directory / "with-ems_minutes.csv")

@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-import simulation as sim
+import core.simulation_ems as sim
 
 DATA = Path("core/Data")
 MOER = DATA / "watttime_MISO_DETROIT_2026-09-13_to_09-26_utc.csv"
@@ -116,11 +116,11 @@ def run(job: tuple) -> dict:
     sim.SETPOINT_COOLTH = FARM_SETPOINT_CLEAN
     sim.SETPOINT_ECON = FARM_SETPOINT_DIRTY
 
-    cooler = sim.Cooler()
+    cooler = sim.SimCooler()
     ev = sim.SimEV(soc_init=EV_SOC_START, charge_rate_kw=sim.EV_CHARGER_KW)
     ev.target = EV_SOC_START
-    battery = sim.Battery(soc_init=50)
-    cooler.ambient = float(inputs["outdoor_f"].iloc[0])
+    battery = sim.SimBattery(soc_init=50)
+    cooler.outdoor_temp = float(inputs["outdoor_f"].iloc[0])
 
     charger_kw = min(amps * sim.OPENEVSE_VOLTS / 1000, ev.rate)
     allowed_days = DAYS[days] if days else ()
