@@ -39,7 +39,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-import simulation as sim
+import core.simulation_ems as sim
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -108,7 +108,7 @@ def new_figure(width: float, height: float, title: str, subtitle: str):
 
 # ── How the farm ran in September (simulation.py only models the farm as it runs now) ──
 
-class SeptemberBattery(sim.Battery):
+class SeptemberBattery(sim.SimBattery):
     """Batt First: solar charges the battery before the loads. With powers_ev, the battery
     also covers the truck after 7 PM, like the real inverter did."""
     powers_ev = False
@@ -158,7 +158,7 @@ class TaperEV(sim.SimEV):
 def configure_farm(tuned: bool, battery_powers_ev: bool = False) -> None:
     # Batt First, the truck charged to 95% and made one Wednesday trip
     # (run_model sets the trip's energy from the measured charge)
-    sim.Battery, sim.SimEV = SeptemberBattery, TaperEV
+    sim.SimBattery, sim.SimEV = SeptemberBattery, TaperEV
     sim.EV_SOC_TARGET = 0.95
     sim.EV_TRIP_WEEKDAYS = (2,)
     for name, value in (TUNED if tuned else ORIGINAL).items():
