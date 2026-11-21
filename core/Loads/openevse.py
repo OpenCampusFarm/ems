@@ -21,7 +21,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 log = logging.getLogger(__name__)
 
-OPENEVSE_URI = os.environ.get("OPENEVSE_URI", "http://openevse.local").rstrip("/")
+OPENEVSE_URI = os.environ.get("OPENEVSE_URI", "http://openevse-ae68.local").rstrip("/")
 OPENEVSE_USER = os.environ.get("OPENEVSE_USER")
 OPENEVSE_PASSWORD = os.environ.get("OPENEVSE_PASSWORD")
 # Numeric client id for our claim (the firmware parses it with toInt(); 0 is
