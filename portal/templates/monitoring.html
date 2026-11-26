@@ -30,28 +30,42 @@
             {% endfor %}
         </nav>
         {% if chart.available or carbon.available %}
-        <div class="plot{% if carbon.available %} with-carbon{% endif %}" role="img"
+        <div class="plot{% if carbon.available %} with-carbon{% endif %}" role="group"
              aria-label="Power in watts{% if carbon.available %} and estimated CO₂ avoided in kilograms per hour{% endif %}. {{ period.summary }}">
             <svg viewBox="0 0 44 176" preserveAspectRatio="none" aria-hidden="true">
                 {% for y, label in chart.ticks if chart.available %}<text x="40" y="{{ y }}" dominant-baseline="middle" text-anchor="end">{{ label }}</text>{% endfor %}
             </svg>
-            <svg viewBox="52 0 632 176" preserveAspectRatio="none" aria-hidden="true">
-                {% for y, label in chart.ticks if chart.available %}<line x1="52" y1="{{ y }}" x2="684" y2="{{ y }}" class="{{ 'zero' if label == '0' else '' }}"/>{% endfor %}
-                {% if carbon.available %}
-                {% for y, label in carbon.ticks if label == '0' %}
-                <line x1="52" y1="{{ y }}" x2="684" y2="{{ y }}" class="carbon-zero"/>
-                {% endfor %}
-                {% endif %}
-                {% for key, segments in (chart.paths.items() | list) + (carbon.paths.items() | list) %}
-                    {% for segment in segments %}
-                        {% if segment | length == 1 %}
-                            <circle class="{{ key }}" cx="{{ segment[0][0] }}" cy="{{ segment[0][1] }}" r="2.8"/>
-                        {% else %}
-                            <polyline class="{{ key }}" points="{% for x,y in segment %}{{ x }},{{ y }} {% endfor %}"/>
-                        {% endif %}
+            <div id="power-chart-viewport" class="chart-viewport" tabindex="0" aria-label="Explore chart values with the left and right arrow keys"
+                 data-power='{{ chart.readout | tojson }}' data-carbon='{{ carbon.readout | tojson }}'
+                 data-start="{{ chart.start }}" data-end="{{ chart.end }}">
+                <svg viewBox="52 0 632 176" preserveAspectRatio="none" aria-hidden="true">
+                    {% for y, label in chart.ticks if chart.available %}<line x1="52" y1="{{ y }}" x2="684" y2="{{ y }}" class="{{ 'zero' if label == '0' else '' }}"/>{% endfor %}
+                    {% if carbon.available %}
+                    {% for y, label in carbon.ticks if label == '0' %}
+                    <line x1="52" y1="{{ y }}" x2="684" y2="{{ y }}" class="carbon-zero"/>
                     {% endfor %}
-                {% endfor %}
-            </svg>
+                    {% endif %}
+                    {% for key, segments in (chart.paths.items() | list) + (carbon.paths.items() | list) %}
+                        {% for segment in segments %}
+                            {% if segment | length == 1 %}
+                                <circle class="{{ key }}" cx="{{ segment[0][0] }}" cy="{{ segment[0][1] }}" r="2.8"/>
+                            {% else %}
+                                <polyline class="{{ key }}" points="{% for x,y in segment %}{{ x }},{{ y }} {% endfor %}"/>
+                            {% endif %}
+                        {% endfor %}
+                    {% endfor %}
+                    <g class="chart-cursor" visibility="hidden">
+                        <line x1="52" y1="6" x2="52" y2="170"/>
+                        {% for key in ['pv', 'grid', 'ev', 'avoided'] %}
+                        <circle class="{{ key }}" r="4" visibility="hidden" data-marker="{{ key }}"/>
+                        {% endfor %}
+                    </g>
+                </svg>
+                <div class="chart-readout" role="status" hidden>
+                    <strong data-readout-time></strong>
+                    <dl></dl>
+                </div>
+            </div>
             {% if carbon.available %}
             <svg class="carbon-axis" viewBox="0 0 36 176" preserveAspectRatio="none" aria-hidden="true">
                 {% for y, label in carbon.ticks %}
@@ -74,9 +88,8 @@
             {% else %}<strong>Waiting for EMS telemetry</strong><span>Measurements appear after the EMS completes a cycle.</span>{% endif %}
         </div>
         {% endif %}
-        {% if carbon.available %}
-        <p class="carbon-caption muted">Modeled grid emissions without EMS minus measured grid emissions. Negative values mean higher measured emissions.</p>
-        {% else %}
+        <p class="carbon-caption muted"><strong>Estimated CO₂ avoided</strong> compares modeled grid emissions without EMS to measured grid emissions. Positive means lower measured emissions, zero means equal, and negative means higher measured emissions.</p>
+        {% if not carbon.available %}
         <p class="carbon-caption muted">No CO₂ savings estimate for this time range.</p>
         {% endif %}
     </section>

@@ -125,6 +125,7 @@ def _dashboard_rows(db, start, end, buckets):
             f"""
             WITH buckets(start, finish) AS (VALUES {spans})
             SELECT (buckets.start + buckets.finish) / 2.0 AS ts,
+                   buckets.start AS bucket_start, buckets.finish AS bucket_end,
                    AVG(samples.pv) AS pv, AVG(samples.grid) AS grid, AVG(samples.ev) AS ev
             FROM buckets
             LEFT JOIN samples ON samples.ts >= buckets.start AND samples.ts < buckets.finish
@@ -178,6 +179,7 @@ def read_carbon(path, start, end, buckets=()):
                 f"""
                 WITH buckets(start, finish) AS (VALUES {spans})
                 SELECT (buckets.start + buckets.finish) / 2.0 AS ts,
+                       buckets.start AS bucket_start, buckets.finish AS bucket_end,
                        SUM(without_ems_lb - actual_lb) * ? / SUM(minutes) AS avoided
                 FROM buckets
                 LEFT JOIN carbon_samples

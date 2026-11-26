@@ -239,6 +239,9 @@ def run_ems_cycle() -> None:
         energy_clean,
     )
 
+    if _stop.is_set():
+        return
+
     new_setpoint = SETPOINT_COOLTH if energy_clean else SETPOINT_ECON
     if new_setpoint != _current_setpoint:
         change_setpoint(new_setpoint)
@@ -246,6 +249,9 @@ def run_ems_cycle() -> None:
         log.info("[CoolBot] Setpoint → %d°F", new_setpoint)
     else:
         log.info("[CoolBot] Setpoint unchanged at %d°F", _current_setpoint)
+
+    if _stop.is_set():
+        return
 
     if ev_data is None:
         log.info("[EV] OpenEVSE unavailable — skipping charging decision")
@@ -271,7 +277,7 @@ def _handle_signal(signum, _frame) -> None:
     if _stop.is_set():
         raise KeyboardInterrupt  # second signal: stop waiting for the current cycle
     log.info(
-        "[EMS] %s received — finishing current cycle, then shutting down "
+        "[EMS] %s received — finishing in-flight work, then shutting down "
         "(signal again to force)",
         signal.Signals(signum).name,
     )

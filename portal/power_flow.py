@@ -68,8 +68,10 @@ def build_chart(rows, end, period, *, series=SERIES, step=1000, unit_scale=1000)
         return 12 + (high - value) * 152 / (high - low)
 
     paths = {}
+    readout = {}
     for key in series:
         segments = []
+        points = []
         previous = None
         for row in rows:
             value = row.get(key)
@@ -81,9 +83,15 @@ def build_chart(rows, end, period, *, series=SERIES, step=1000, unit_scale=1000)
             if previous is None or (not period.bucket and stamp - previous > GAP):
                 segments.append([])
             x = 52 + (stamp - start) * 632 / period.duration
-            segments[-1].append((round(x, 2), round(y(value), 2)))
+            point = (round(x, 2), round(y(value), 2))
+            segments[-1].append(point)
+            points.append({
+                "x": point[0], "y": point[1], "ts": stamp, "value": value,
+                "start": row.get("bucket_start"), "end": row.get("bucket_end"),
+            })
             previous = stamp
         paths[key] = segments
+        readout[key] = points
 
     ticks = [(12, f"{high / unit_scale:g}"), (y(0), "0")]
     if low:
@@ -92,4 +100,7 @@ def build_chart(rows, end, period, *, series=SERIES, step=1000, unit_scale=1000)
         datetime.fromtimestamp(start + period.duration * i / 4, FARM_TIME).strftime(period.tick_format)
         for i in range(5)
     ]
-    return {"paths": paths, "ticks": ticks, "available": bool(values), "times": times}
+    return {
+        "paths": paths, "readout": readout, "ticks": ticks, "available": bool(values), "times": times,
+        "start": start, "end": end,
+    }

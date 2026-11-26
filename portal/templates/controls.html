@@ -4,7 +4,7 @@
 <div class="control-grid">
     {% for target, title, description in (
         ('fan', 'Ventilation fan', 'Auto uses outdoor temperature and CoolBot readings.'),
-        ('ems', 'EMS automation', 'Off hands charging control back to OpenEVSE.'))
+        ('ems', 'EMS automation', 'Off stops automatic CoolBot setpoint changes and returns charging control to OpenEVSE. CoolBot keeps its current setpoint.'))
     %}
     <section class="panel control-panel" aria-labelledby="{{ target }}-title">
         <div class="panel-heading"><h3 id="{{ target }}-title">{{ title }}</h3><span class="badge">Requested · {{ state[target] | title }}</span></div>

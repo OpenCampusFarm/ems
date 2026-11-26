@@ -112,3 +112,22 @@ fieldset { min-width: 0; margin: 14px 0 0; border: none; padding: 0; }
     .metric { padding-inline: 10px; }
     .status > div { display: grid; justify-items: start; }
 }
+
+.chart-viewport { position: relative; min-width: 0; cursor: crosshair; touch-action: pan-y; }
+.chart-viewport:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+.plot .chart-cursor line { stroke: #53666f; stroke-dasharray: 4 3; }
+.plot .chart-cursor circle { stroke: var(--surface); stroke-width: 1.5px; vector-effect: non-scaling-stroke; }
+.chart-readout {
+    position: absolute; z-index: 1; top: 6px; left: 8px; right: auto;
+    width: max-content; max-width: calc(100% - 16px); padding: 8px 10px;
+    color: var(--ink); background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; box-shadow: 0 3px 12px #122c3624; pointer-events: none;
+    font-size: .8rem; font-variant-numeric: tabular-nums;
+}
+.chart-readout.readout-right { left: auto; right: 8px; }
+.chart-readout strong { display: block; margin-bottom: 5px; }
+.chart-readout dl { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 3px 8px; margin: 0; }
+.chart-readout dd { margin: 0; text-align: right; }
+.chart-readout time { display: block; color: var(--muted); font-size: .72rem; }
+
+.plot .chart-cursor[visibility="hidden"] { display: none; }
