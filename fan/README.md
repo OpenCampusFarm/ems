@@ -54,12 +54,10 @@ The service runs supervisord as root so the fan program can access GPIO. Core an
 
 ## Fan mode override
 
-`FAN_MODE` in `main.py` controls override behavior:
+The fan reads the shared `../system.db` at startup and defaults to Auto if the file is absent. Use the [operator portal](../portal/README.md) to change its mode and restart the fan process through supervisord.
 
 | Value | Behavior |
 |-------|----------|
-| `FanMode.AUTO` | Normal EMS-controlled operation (default) |
-| `FanMode.FORCE_ON` | Fan always ON regardless of conditions |
-| `FanMode.FORCE_OFF` | Fan always OFF regardless of conditions |
-
-In all modes, outdoor temperature and room temperature are still read each cycle and printed in the log.
+| Auto | Apply the CoolBot and outdoor-temperature rules |
+| On | Turn on the relay without waiting for network readings |
+| Off | Turn off the relay without waiting for network readings |

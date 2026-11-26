@@ -14,13 +14,19 @@ Decision logic (every POLL_INTERVAL seconds):
 import logging
 import os
 import signal
+import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import requests
 from dotenv import load_dotenv
+
+from dashboard_telemetry import publish
+from system_state import read_state
 
 from Loads.coolbot import change_setpoint, get_room_temp
 from Loads.openevse import get_status as get_ev_status
@@ -217,6 +223,8 @@ def run_ems_cycle() -> None:
             ev_data["power_w"],
         )
 
+    publish(power, egauge, ev_data, room_temp, moer, "binary")
+
     pv_producing = pv_w >= PV_MIN_WATTS
     grid_clean = moer is not None and moer < CO2_CLEAN_THRESHOLD
     energy_clean = pv_producing or grid_clean
@@ -290,6 +298,9 @@ def shutdown() -> None:
 
 
 def main() -> None:
+    if read_state()["ems"] == "off":
+        log.info("[EMS] Disabled by system.db")
+        return
     # SIGBREAK only exists on Windows (Ctrl-Break / console close).
     for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
         sig = getattr(signal, name, None)

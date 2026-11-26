@@ -3,6 +3,7 @@ import enum
 import logging
 import os
 import signal
+import sys
 from pathlib import Path
 
 import requests
@@ -20,6 +21,9 @@ except ImportError:
 from dotenv import load_dotenv
 
 from coolbot import CoolBotClient
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from system_state import read_state
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -40,7 +44,6 @@ class FanMode(enum.Enum):
 # --- Fan / Relay config ---
 RELAY_PIN = 23
 POLL_INTERVAL = 30  # seconds between checks
-FAN_MODE = FanMode.FORCE_OFF
 HYSTERESIS = 2.0  # °F deadband
 
 # The coordinates for the UM Campus Farm
@@ -115,7 +118,12 @@ def set_fan(on: bool):
 # --- Main control loop ---
 
 
-async def control_loop():
+async def control_loop(mode: FanMode):
+    if mode is not FanMode.AUTO:
+        set_fan(mode is FanMode.FORCE_ON)
+        await asyncio.Event().wait()
+        return
+
     fan_on = False
     while True:
         try:
@@ -124,23 +132,7 @@ async def control_loop():
                 room = cb.room_temp
                 setpoint = cb.set_temp_f
 
-                if FAN_MODE is FanMode.FORCE_ON:
-                    log.info(
-                        "[Fan] FORCE_ON — fan forced ON (outdoor=%s°F, room=%s°F)",
-                        f"{outdoor:.1f}" if outdoor is not None else "N/A",
-                        f"{room:.1f}" if room is not None else "N/A",
-                    )
-                    fan_on = True
-                    set_fan(True)
-                elif FAN_MODE is FanMode.FORCE_OFF:
-                    log.info(
-                        "[Fan] FORCE_OFF — fan forced OFF (outdoor=%s°F, room=%s°F)",
-                        f"{outdoor:.1f}" if outdoor is not None else "N/A",
-                        f"{room:.1f}" if room is not None else "N/A",
-                    )
-                    fan_on = False
-                    set_fan(False)
-                elif not cb.is_running:
+                if not cb.is_running:
                     log.warning("[CoolBot] Offline or off — fan OFF")
                     fan_on = False
                     set_fan(False)
@@ -202,10 +194,10 @@ def _install_shutdown_handlers(loop: asyncio.AbstractEventLoop, task: asyncio.Ta
             signal.signal(sig, handler)
 
 
-async def run():
+async def run(mode: FanMode):
     # Any shutdown signal cancels the control loop so the CoolBot connection
     # closes cleanly and main() can switch the relay off.
-    task = asyncio.create_task(control_loop())
+    task = asyncio.create_task(control_loop(mode))
     _install_shutdown_handlers(asyncio.get_running_loop(), task)
     try:
         await task
@@ -215,9 +207,11 @@ async def run():
 
 def main():
     log.info("[Fan] Starting up...")
+    mode = FanMode(read_state()["fan"])
+    log.info("[Fan] Mode: %s", mode.value)
     setup_gpio()
     try:
-        asyncio.run(run())
+        asyncio.run(run(mode))
     finally:
         log.info("[Fan] Shutting down — fan OFF, releasing GPIO")
         set_fan(False)

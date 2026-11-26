@@ -1,0 +1,33 @@
+{% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
+{% if message %}<p class="notice" role="status">{{ message }}</p>{% endif %}
+{% if state %}
+<div class="control-grid">
+    {% for target, title, description in (
+        ('fan', 'Ventilation fan', 'Auto uses outdoor temperature and CoolBot readings.'),
+        ('ems', 'EMS automation', 'Off hands charging control back to OpenEVSE.'))
+    %}
+    <section class="panel control-panel" aria-labelledby="{{ target }}-title">
+        <div class="panel-heading"><h3 id="{{ target }}-title">{{ title }}</h3><span class="badge">Requested · {{ state[target] | title }}</span></div>
+        <p class="muted">{{ description }}</p>
+        <form method="post" action="{{ url_for('set_mode', target=target) }}"
+              hx-post="{{ url_for('set_mode', target=target) }}" hx-target="#controller-cards"
+              hx-swap="innerHTML" hx-disabled-elt="find fieldset" hx-sync="#controller-cards:drop">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <fieldset>
+                <legend class="sr-only">{{ title }} mode</legend>
+                <div class="segments">
+                    {% for mode in modes[target] %}
+                    <button name="mode" value="{{ mode }}" type="submit"
+                            aria-pressed="{{ 'true' if state[target] == mode else 'false' }}">{{ mode | title }}</button>
+                    {% endfor %}
+                </div>
+                {% if state[target ~ '_pending'] %}
+                <button class="retry" name="mode" value="{{ state[target] }}" type="submit">Retry applying mode</button>
+                {% endif %}
+            </fieldset>
+            <p class="applying" role="status">Applying mode…</p>
+        </form>
+    </section>
+    {% endfor %}
+</div>
+{% endif %}

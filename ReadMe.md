@@ -1,6 +1,6 @@
 # EMS
 
-Energy Management System consisting of two subprojects: `core` and `fan`.
+Energy Management System with `core`, `fan`, and the [operator portal](portal/README.md). Use the portal setup to configure the operator account and its Python environment.
 
 ## Project Structure
 
@@ -8,6 +8,8 @@ Energy Management System consisting of two subprojects: `core` and `fan`.
 ems/
 ├── core/           # Core subproject
 ├── fan/            # Fan subproject
+├── portal/         # Operator web console
+├── system_state.py # Shared controller settings
 ├── supervisord.conf
 ├── update.sh
 └── ems.service
@@ -26,20 +28,18 @@ ems/
 git clone https://github.com/OpenCampusFarm/ems /home/pi/ems
 ```
 
-### 2. Install systemd service
+### 2. Install the Python environments and systemd service
 
-```bash
-sudo cp ems.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now ems
-```
+Follow the [Raspberry Pi setup](portal/README.md#install-on-the-raspberry-pi). On a new installation, also enable startup at boot with `sudo systemctl enable ems.service`.
 
-This starts supervisord which manages three processes:
+This starts supervisord, which manages the following processes:
 
 | Program   | Description                                          |
 | --------- | ---------------------------------------------------- |
-| `core`    | Runs `core/main.py` via `uv`                         |
+| `core`    | Runs `core/main.py` from the core virtual environment                         |
 | `fan`     | Runs `fan/main.py` via `uv`                          |
+| `dashboard_publisher` | Publishes power and carbon readings to the farm website |
+| `portal`  | Runs the operator web console                          |
 | `updater` | Polls GitHub every 2 min and restarts on new commits |
 
 ## Auto-update
@@ -69,4 +69,5 @@ sudo systemctl start ems
 tail -f /tmp/ems_core.log
 tail -f /tmp/ems_fan.log
 tail -f /tmp/ems_updater.log
+tail -f /tmp/ems_portal.log
 ```

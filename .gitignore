@@ -8,3 +8,10 @@ uv.lock
 .DS_Store
 *.csv
 *.json
+
+# Shared controller state and local preview files
+system.db
+system.db-*
+system.db.lock
+ems-telemetry.json.tmp
+.system-db-*/

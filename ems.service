@@ -4,6 +4,14 @@ After=network.target
 
 [Service]
 Type=simple
+RuntimeDirectory=campus-ems
+RuntimeDirectoryMode=0750
+UMask=0007
+ExecStartPre=/usr/bin/chgrp pi /run/campus-ems
+ExecStartPre=/usr/bin/chmod 2750 /run/campus-ems
+ExecStartPre=/usr/bin/install -m 0640 /home/pi/ems/portal/supervisord.conf /run/campus-ems/portal.conf
+KillMode=mixed
+TimeoutStopSec=120
 ExecStart=supervisord -c /home/pi/ems/supervisord.conf
 Restart=always
 

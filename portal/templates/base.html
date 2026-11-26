@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"historyCacheSize":0,"timeout":140000}'>
+    <link rel="icon" href="{{ url_for('static', filename='farm.png') }}">
+    <title>{% block title %}Farm Energy Portal{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='portal.css') }}">
+    <script src="{{ url_for('static', filename='htmx.min.js') }}" defer></script>
+    <script src="{{ url_for('static', filename='portal.js') }}" defer></script>
+</head>
+<body>
+    <header class="topbar">
+        <div class="shell topbar-inner">
+            <div class="brand"><span class="brand-mark" aria-hidden="true">ϟ</span> Campus Farm <span class="brand-detail">/ Energy</span></div>
+            {% block header %}{% endblock %}
+        </div>
+    </header>
+    {% block body %}{% endblock %}
+</body>
+</html>

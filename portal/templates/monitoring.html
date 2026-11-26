@@ -1,0 +1,42 @@
+<div class="status">
+    <div><strong>EMS service</strong><span class="badge {{ 'running' if ems_service == 'Running' }}">{{ ems_service }}</span></div>
+    <div><strong>Fan service</strong><span class="badge {{ 'running' if fan_service == 'Running' }}">{{ fan_service }}</span></div>
+    <div><strong>Charging policy</strong><span>{{ latest.get('policy', '—') | title }}</span></div>
+    <div><strong>Telemetry</strong><span>{{ last_sample ~ ' ET' if last_sample else 'Waiting for data' }}{% if stale %} · Stale{% endif %}</span></div>
+</div>
+{% if stale %}<p class="notice">Showing the last recorded measurements. The EMS has not published a sample in over 12 minutes.</p>{% endif %}
+<div class="metrics">
+    {% for key, label in series.items() %}
+    <div class="panel metric {{ key }}"><span>{{ label }}</span><strong>{{ '%.2f' | format(latest[key] / 1000) if numeric(latest.get(key)) else '—' }} <small>kW</small></strong></div>
+    {% endfor %}
+    <div class="panel metric room"><span>Cooler temperature</span><strong>{{ '%.1f' | format(latest.room) if numeric(latest.get('room')) else '—' }} <small>°F</small></strong></div>
+</div>
+<section class="panel chart">
+    <div class="panel-heading"><h2>Power flow</h2><span class="muted">kW · Last 24 hours · ET</span></div>
+    {% if chart.available %}
+    <div class="plot" role="img" aria-label="Solar production, grid power, and EV charging power over the last 24 hours in kilowatts">
+        <svg viewBox="0 0 27 176" preserveAspectRatio="none" aria-hidden="true">
+            {% for y, label in chart.ticks %}<text x="23" y="{{ y }}" dominant-baseline="middle" text-anchor="end">{{ label }}</text>{% endfor %}
+        </svg>
+        <svg viewBox="52 0 632 176" preserveAspectRatio="none" aria-hidden="true">
+            {% for y, label in chart.ticks %}<line x1="52" y1="{{ y }}" x2="684" y2="{{ y }}" class="{{ 'zero' if label == '0' else '' }}"/>{% endfor %}
+            {% for key, segments in chart.paths.items() %}
+                {% for segment in segments %}
+                    {% if segment | length == 1 %}
+                        <circle class="{{ key }}" cx="{{ segment[0][0] }}" cy="{{ segment[0][1] }}" r="2.8"/>
+                    {% else %}
+                        <polyline class="{{ key }}" points="{% for x,y in segment %}{{ x }},{{ y }} {% endfor %}"/>
+                    {% endif %}
+                {% endfor %}
+            {% endfor %}
+        </svg>
+        <div class="times" aria-hidden="true">{% for label in chart.times %}<span>{{ label }}</span>{% endfor %}</div>
+    </div>
+    <div class="chart-footer">
+        <ul class="legend">{% for key, label in series.items() %}<li class="{{ key }}">{{ label }}</li>{% endfor %}</ul>
+        <span class="muted">Negative grid power = export</span>
+    </div>
+    {% else %}
+    <div class="empty"><strong>Waiting for EMS telemetry</strong><span>Measurements appear after the EMS completes a cycle.</span></div>
+    {% endif %}
+</section>
