@@ -1,6 +1,5 @@
 import fcntl
 import hmac
-import json
 import logging
 import os
 import secrets
@@ -10,11 +9,9 @@ import time
 from collections import deque
 from datetime import datetime, timedelta
 from http.client import HTTPException
-from math import ceil, isfinite
 from pathlib import Path
 from threading import Lock
 from xmlrpc.client import Error as RPCError
-from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from flask import Flask, abort, redirect, render_template, request, session, url_for
@@ -22,57 +19,16 @@ from flask import Flask, abort, redirect, render_template, request, session, url
 from process_control import apply_mode, service_status
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from system_state import DATABASE, MODES, TELEMETRY, mark_applied, read_state, save_mode
+from power_flow import (
+    CARBON_SERIES, DEFAULT_PERIOD, FARM_TIME, GAP, PERIODS, SERIES, build_chart, chart_buckets,
+)
+from system_state import DATABASE, MODES, mark_applied, read_state, save_mode
+from telemetry_store import LEGACY_TELEMETRY, TELEMETRY_DB, numeric, read_carbon, read_dashboard
 
 log = logging.getLogger(__name__)
 
-SERIES = {"pv": "Solar production", "grid": "Grid power", "ev": "EV charging"}
-WINDOW = 24 * 3600
-GAP = 12 * 60
-FARM_TIME = ZoneInfo("America/Detroit")
 
-
-def numeric(value):
-    return type(value) in (float, int) and isfinite(value)
-
-
-def build_chart(rows, now):
-    start = now - WINDOW
-    values = [row[key] for row in rows for key in SERIES if numeric(row.get(key))]
-    high = max(1000, ceil(max(values, default=0) / 1000) * 1000)
-    low = min(0, -ceil(-min(values, default=0) / 1000) * 1000)
-
-    def y(value):
-        return 12 + (high - value) * 152 / (high - low)
-
-    paths = {}
-    for key in SERIES:
-        segments = []
-        previous = None
-        for row in rows:
-            value = row.get(key)
-            if not numeric(value):
-                previous = None
-                continue
-            stamp = row["ts"]
-            if previous is None or stamp - previous > GAP:
-                segments.append([])
-            x = 52 + (stamp - start) * 632 / WINDOW
-            segments[-1].append((round(x, 2), round(y(value), 2)))
-            previous = stamp
-        paths[key] = segments
-
-    ticks = [(12, f"{high / 1000:g}"), (y(0), "0")]
-    if low:
-        ticks.append((164, f"{low / 1000:g}"))
-    return {
-        "paths": paths, "ticks": ticks, "available": bool(values),
-        "times": [datetime.fromtimestamp(start + WINDOW * i / 4, FARM_TIME).strftime("%H:%M")
-                  for i in range(5)],
-    }
-
-
-def create_app(database=DATABASE, telemetry=TELEMETRY, demo=False):
+def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *, legacy=LEGACY_TELEMETRY):
     load_dotenv(Path(__file__).with_name(".env"))
 
     app = Flask(__name__)
@@ -218,19 +174,31 @@ def create_app(database=DATABASE, telemetry=TELEMETRY, demo=False):
 
     @app.get("/monitoring")
     def monitoring():
+        key = request.args.get("range", DEFAULT_PERIOD)
+        if key not in PERIODS:
+            key = DEFAULT_PERIOD
+        period = PERIODS[key]
         now = time.time()
+        start = now - period.duration
+        buckets = chart_buckets(start, now, period.bucket)
+        unavailable = False
         try:
-            rows = json.loads(telemetry.read_text())
-        except (OSError, ValueError):
-            rows = []
-        rows = sorted(
-            (row for row in rows if isinstance(row, dict) and numeric(row.get("ts"))
-             and now - WINDOW <= row["ts"] <= now),
-            key=lambda row: row["ts"],
-        ) if isinstance(rows, list) else []
-        latest = rows[-1] if rows else {}
+            latest, rows = read_dashboard(
+                telemetry, None if demo else legacy, start, now, buckets
+            )
+        except (OSError, sqlite3.Error):
+            log.exception("[Portal] Could not read telemetry")
+            latest, rows = {}, []
+            unavailable = True
+        try:
+            carbon_rows = read_carbon(telemetry, start, now, buckets)
+        except (OSError, sqlite3.Error):
+            log.exception("[Portal] Could not read carbon estimates")
+            carbon_rows = []
         return render_template(
-            "monitoring.html", latest=latest, chart=build_chart(rows, now), series=SERIES,
+            "monitoring.html", latest=latest, chart=build_chart(rows, now, period, unit_scale=1), series=SERIES,
+            carbon=build_chart(carbon_rows, now, period, series=CARBON_SERIES, step=0.25, unit_scale=1),
+            periods=PERIODS, selected=key, period=period, unavailable=unavailable,
             last_sample=datetime.fromtimestamp(latest["ts"], FARM_TIME).strftime("%b %d, %H:%M")
             if latest else None,
             stale=bool(latest and now - latest["ts"] > GAP),
@@ -257,7 +225,7 @@ if __name__ == "__main__":
 
         with TemporaryDirectory(prefix="campus-portal-") as directory:
             data = Path(directory)
-            telemetry = data / "ems-telemetry.json"
+            telemetry = data / "telemetry.db"
             write_samples(telemetry)
             serve(create_app(data / "system.db", telemetry, demo=True), host="127.0.0.1", port=8080,
                   channel_timeout=150)

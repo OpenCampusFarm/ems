@@ -5,10 +5,11 @@ Every POWER_PUBLISH_INTERVAL seconds it reads PV / grid / load power from the
 SolArk inverter API and POSTs it to the site's cf_data module
 (`/api/cf/power`), for the cf_power_flow diagram.
 
-With PUBLISH_CARBON=1 it also runs the carbon calculator (carbon_live.py) on
-the same readings plus live MOER (WattTime), truck plugged in (OpenEVSE) and
-outdoor temperature (Open-Meteo), and POSTs the three carbon lines for the
-cf_carbon graph to `/api/cf/carbon` every CARBON_PUBLISH_MINUTES.
+By default it runs the carbon calculator (carbon_live.py) using
+live MOER (WattTime), truck connection (OpenEVSE), and outdoor temperature
+(Open-Meteo). It stores estimates locally for the Portal and, when Drupal is
+configured, POSTs the three carbon lines to `/api/cf/carbon` every
+CARBON_PUBLISH_MINUTES.
 
 The carbon shadow farm (simulated truck and battery) keeps its state in
 carbon_live_state.json, so it carries on across restarts. When that file
@@ -22,6 +23,7 @@ no EMS control decisions.
 """
 
 import logging
+import sqlite3
 import sys
 import os
 import time
@@ -36,6 +38,9 @@ from Loads.openevse import get_status as get_ev_status
 from watttime_client import get_grid_moer
 from solArk_inverter import fetch_plant_data
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from telemetry_store import record_carbon
+
 load_dotenv(Path(__file__).parent / ".env")
 
 logging.basicConfig(
@@ -49,13 +54,13 @@ DRUPAL_BASE_URL = os.getenv("DRUPAL_BASE_URL", "").rstrip("/")
 DRUPAL_POWER_ENDPOINT = f"{DRUPAL_BASE_URL}/api/cf/power"
 DRUPAL_CARBON_ENDPOINT = f"{DRUPAL_BASE_URL}/api/cf/carbon"
 CF_DATA_TOKEN = os.getenv("CF_DATA_TOKEN", "")  # must match $settings['cf_data_token'] on the site
-PUBLISH_INTERVAL = int(os.getenv("POWER_PUBLISH_INTERVAL", "60"))  # seconds
+PUBLISH_INTERVAL = int(os.getenv("POWER_PUBLISH_INTERVAL") or "60")  # seconds
 
 # ── Carbon ────────────────────────────────────────────────────────────────────
-PUBLISH_CARBON = os.getenv("PUBLISH_CARBON", "0") == "1"
+PUBLISH_CARBON = (os.getenv("PUBLISH_CARBON") or "1") == "1"
 CARBON_PUBLISH_MINUTES = int(os.getenv("CARBON_PUBLISH_MINUTES", "5"))   # one carbon row per this many minutes
 CARBON_MAX_PENDING_MINUTES = 60   # /api/cf/carbon accepts up to 60 minutes per row
-CARBON_START_EV_SOC_PERCENT = float(os.getenv("CARBON_START_EV_SOC_PERCENT", "80"))   # fresh start only
+CARBON_START_EV_SOC_PERCENT = float(os.getenv("CARBON_START_EV_SOC_PERCENT") or "80")   # fresh start only
 
 MOER_REFRESH_SECONDS = 300        # WattTime publishes MOER every 5 minutes
 MOER_MAX_AGE_SECONDS = 1800       # older than this = no MOER, carbon waits
@@ -137,7 +142,8 @@ def get_outdoor_f() -> float | None:
 class CarbonPublisher:
     """Feeds each reading to carbon_live's CarbonTracker and POSTs the totals every few minutes."""
 
-    def __init__(self) -> None:
+    def __init__(self, publish_drupal: bool) -> None:
+        self.publish_drupal = publish_drupal
         self.tracker: CarbonTracker | None = None
         self.moer_lb_per_mwh: float | None = None
         self.moer_time = 0.0
@@ -188,8 +194,9 @@ class CarbonPublisher:
                          CARBON_START_EV_SOC_PERCENT, flow["soc"])
 
         grid_buy_kw = max(0.0, -signed_grid_watts(flow)) / 1000.0
+        timestamp = pd.Timestamp.now(tz="America/Detroit")
         result = self.tracker.update(
-            pd.Timestamp.now(tz="America/Detroit"), minutes,
+            timestamp, minutes,
             pv_kw=flow["pv"] / 1000.0,
             moer_lb_per_mwh=self.moer_lb_per_mwh,
             outdoor_f=self.outdoor_f,
@@ -197,6 +204,14 @@ class CarbonPublisher:
             grid_buy_kw=grid_buy_kw,
         )
         self.tracker.save_state()
+        try:
+            record_carbon(((timestamp.timestamp(), minutes,
+                            float(result["without_ems_co2_lb"]), float(result["with_ems_co2_lb"])),))
+        except (OSError, sqlite3.Error) as exc:
+            log.warning("[Carbon] Could not save Portal telemetry: %s", exc)
+
+        if not self.publish_drupal:
+            return
 
         self.pending["minutes"] += minutes
         self.pending["grid_buy_kwh"] += grid_buy_kw * minutes / 60.0
@@ -235,17 +250,18 @@ class CarbonPublisher:
 
 
 def main() -> None:
-    if not DRUPAL_BASE_URL or not CF_DATA_TOKEN:
+    publish_drupal = bool(DRUPAL_BASE_URL and CF_DATA_TOKEN)
+    if not publish_drupal and not PUBLISH_CARBON:
         # Exit cleanly so supervisord (autorestart=unexpected) doesn't keep restarting it.
         log.info("Dashboard publisher not configured: set DRUPAL_BASE_URL and CF_DATA_TOKEN in core/.env")
         sys.exit(0)
 
     log.info(
-        "Dashboard publisher starting — power every %ds to %s%s",
-        PUBLISH_INTERVAL, DRUPAL_POWER_ENDPOINT,
-        f", carbon every {CARBON_PUBLISH_MINUTES} min to {DRUPAL_CARBON_ENDPOINT}" if PUBLISH_CARBON else "",
+        "Dashboard publisher starting — poll every %ds, Drupal %s, carbon %s",
+        PUBLISH_INTERVAL, "enabled" if publish_drupal else "disabled",
+        "enabled" if PUBLISH_CARBON else "disabled",
     )
-    carbon = CarbonPublisher() if PUBLISH_CARBON else None
+    carbon = CarbonPublisher(publish_drupal) if PUBLISH_CARBON else None
     cycle_minutes = max(1, round(PUBLISH_INTERVAL / 60))   # each reading stands for this many minutes
     while True:
         try:
@@ -253,7 +269,8 @@ def main() -> None:
             if flow is None:
                 log.warning("[SolArk] No flow data available — skipping publish")
             else:
-                publish_power(flow)
+                if publish_drupal:
+                    publish_power(flow)
                 if carbon is not None:
                     carbon.cycle(flow, cycle_minutes)
             time.sleep(PUBLISH_INTERVAL)

@@ -15,3 +15,5 @@ system.db-*
 system.db.lock
 ems-telemetry.json.tmp
 .system-db-*/
+telemetry.db
+telemetry.db-*

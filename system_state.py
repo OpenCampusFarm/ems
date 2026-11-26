@@ -8,7 +8,6 @@ from tempfile import TemporaryDirectory
 
 ROOT = Path(__file__).resolve().parent
 DATABASE = Path(os.environ.get("EMS_SYSTEM_DB", ROOT / "system.db"))
-TELEMETRY = Path(os.environ.get("EMS_TELEMETRY", DATABASE.with_name("ems-telemetry.json")))
 MODES = {"fan": ("off", "on", "auto"), "ems": ("off", "on")}
 DEFAULTS = {"fan": "auto", "ems": "on"}
 

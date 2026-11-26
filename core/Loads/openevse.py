@@ -11,6 +11,7 @@ a person at the charger can always override the EMS.
 """
 
 import logging
+from math import isfinite
 import os
 from pathlib import Path
 
@@ -52,11 +53,16 @@ def get_status() -> dict | None:
     try:
         raw = _request("GET", "/status").json()
         state = raw.get("state")
+        try:
+            milliamps = float(raw["amp"])
+        except (KeyError, TypeError, ValueError):
+            milliamps = -1.0
         status = {
             "state": state,
             "connected": bool(raw.get("vehicle"))
             or state in (STATE_CONNECTED, STATE_CHARGING),
             "charging": state == STATE_CHARGING,
+            "current_a": milliamps / 1000 if isfinite(milliamps) and milliamps >= 0 else None,
             "power_w": float(raw.get("power", 0) or 0),
         }
         log.info(

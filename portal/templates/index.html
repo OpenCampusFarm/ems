@@ -12,9 +12,7 @@
         {% if demo %}<span class="badge preview">Preview · Synthetic data</span>{% endif %}
     </div>
     <p id="connection-error" class="notice error" role="alert" hidden>Request failed. Refresh the page to check the current state.</p>
-    <div id="monitoring" hx-get="{{ url_for('monitoring') }}" hx-trigger="every 15s" hx-sync="this:drop">
-        {{ monitoring | safe }}
-    </div>
+    {{ monitoring | safe }}
     <h2 class="section-title">Controls</h2>
     <div id="controller-cards">{{ controls | safe }}</div>
 </main>

@@ -6,7 +6,7 @@ if (connectionAlert) {
     document.body.addEventListener("htmx:afterRequest", ({ detail }) => {
         if (detail.successful && detail.target.id === "controller-cards") {
             connectionAlert.hidden = true;
-            htmx.ajax("GET", "/monitoring", "#monitoring");
+            htmx.trigger("#monitoring", "refresh-monitoring");
         }
     });
 }
