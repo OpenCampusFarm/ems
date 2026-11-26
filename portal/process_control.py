@@ -37,32 +37,35 @@ def _supervisor(timeout):
 def apply_mode(target, mode):
     program = PROGRAMS[target]
     with _supervisor(115) as rpc:
+        original_pid = rpc.supervisor.getProcessInfo(program)["pid"]
         try:
-            if not rpc.supervisor.stopProcess(program, True):
-                raise OSError(f"Supervisor did not confirm {program} stopped")
+            rpc.supervisor.stopProcess(program, True)
         except xmlrpc.client.Fault as error:
             if error.faultCode != NOT_RUNNING:
                 raise
-            if rpc.supervisor.getProcessInfo(program)["statename"].upper() not in STOPPED:
-                raise OSError(f"{program} is still transitioning") from error
+        if rpc.supervisor.getProcessInfo(program)["statename"].upper() not in STOPPED:
+            raise OSError(f"Supervisor did not confirm {program} stopped")
         if not (target == "ems" and mode == "off"):
-            _start(rpc, program)
+            _start(rpc, program, original_pid)
 
 
-def _start(rpc, program):
-    # Go supervisord can acknowledge a stop before clearing its start guard,
-    # especially if the previous process lived for less than two seconds.
-    deadline = time.monotonic() + 6
+def _start(rpc, program, original_pid):
+    # Older Go supervisord releases may acknowledge a start that was ignored.
+    deadline = time.monotonic() + 8
     while True:
-        try:
-            if rpc.supervisor.startProcess(program, True):
-                return
-            raise OSError(f"Supervisor did not confirm {program} started")
-        except xmlrpc.client.Fault as error:
-            if (error.faultCode != FAILED or time.monotonic() >= deadline
-                    or rpc.supervisor.getProcessInfo(program)["statename"].upper() not in STOPPED):
-                raise
-            time.sleep(0.5)
+        info = rpc.supervisor.getProcessInfo(program)
+        state = info["statename"].upper()
+        if state == "RUNNING" and info["pid"] > 0 and info["pid"] != original_pid:
+            return
+        if time.monotonic() >= deadline:
+            raise OSError(f"Supervisor did not confirm a new {program} process")
+        if state in STOPPED:
+            try:
+                rpc.supervisor.startProcess(program, True)
+            except xmlrpc.client.Fault as error:
+                if error.faultCode != FAILED:
+                    raise
+        time.sleep(0.25)
 
 
 def service_status(target):

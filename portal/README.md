@@ -38,6 +38,7 @@ As `pi`:
 ```bash
 cd /home/pi/ems
 (cd core && uv sync)
+(cd fan && uv sync)
 (cd portal && uv sync)
 ```
 

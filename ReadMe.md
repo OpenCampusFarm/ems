@@ -37,7 +37,7 @@ This starts supervisord, which manages the following processes:
 | Program   | Description                                          |
 | --------- | ---------------------------------------------------- |
 | `core`    | Runs `core/main.py` from the core virtual environment                         |
-| `fan`     | Runs `fan/main.py` via `uv`                          |
+| `fan`     | Runs `fan/main.py` from the fan virtual environment                          |
 | `dashboard_publisher` | Publishes power and carbon readings to the farm website |
 | `portal`  | Runs the operator web console                          |
 | `updater` | Polls GitHub every 2 min and restarts on new commits |
