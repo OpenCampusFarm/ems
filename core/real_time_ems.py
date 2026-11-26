@@ -300,6 +300,8 @@ def shutdown() -> None:
 def main() -> None:
     if read_state()["ems"] == "off":
         log.info("[EMS] Disabled by system.db")
+        # Give supervisord time to register the process before a clean exit.
+        time.sleep(2)
         return
     # SIGBREAK only exists on Windows (Ctrl-Break / console close).
     for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
