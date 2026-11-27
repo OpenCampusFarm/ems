@@ -43,7 +43,10 @@ class FanMode(enum.Enum):
 # --- Fan / Relay config ---
 RELAY_PIN = 23
 POLL_INTERVAL = 30  # seconds between checks
-HYSTERESIS = 2.0  # °F deadband
+START_BELOW_SETPOINT_F = 0.5
+STOP_BELOW_SETPOINT_F = 1.0
+START_OUTDOOR_DIFFERENCE_F = 3.0
+STOP_OUTDOOR_DIFFERENCE_F = 1.0
 
 
 def get_outdoor_temp() -> float | None:
@@ -99,17 +102,21 @@ async def control_loop(mode: FanMode):
                     fan_on = False
                     set_fan(mode, False)
                 elif not fan_on and (
-                    outdoor + HYSTERESIS < setpoint and room > setpoint + HYSTERESIS
+                    room >= setpoint - START_BELOW_SETPOINT_F
+                    and room - outdoor >= START_OUTDOOR_DIFFERENCE_F
                 ):
                     fan_on = True
                     log.info(
-                        "[Fan] outdoor=%.1f°F < setpoint=%.1f°F < room=%.1f°F — fan ON",
+                        "[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F — fan ON",
                         outdoor,
                         setpoint,
                         room,
                     )
                     set_fan(mode, True)
-                elif fan_on and (outdoor >= setpoint or room <= setpoint):
+                elif fan_on and (
+                    room <= setpoint - STOP_BELOW_SETPOINT_F
+                    or room - outdoor <= STOP_OUTDOOR_DIFFERENCE_F
+                ):
                     fan_on = False
                     log.info(
                         "[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F — fan OFF",

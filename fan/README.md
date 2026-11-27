@@ -10,16 +10,13 @@ Controls a ventilation fan on a Raspberry Pi based on outdoor temperature and Co
 
 ## Fan logic
 
-Every 30 seconds:
+Auto checks temperatures every 30 seconds. The fan can cool the room before CoolBot calls for cooling at its own setpoint.
 
-1. Connect to the CoolBot and read its state
-2. If CoolBot is **offline or off** → fan OFF
-3. If CoolBot is **on**, read outdoor temp (`outdoor`) and compare with room temp (`room`) and CoolBot setpoint (`setpoint`):
-   - Fan turns **ON** when: `outdoor + 2 < setpoint` AND `room > setpoint + 2`
-   - Fan turns **OFF** when: `outdoor >= setpoint` OR `room <= setpoint`
-   - Otherwise fan state is **unchanged** (hysteresis deadband prevents rapid on/off cycling)
+- **On** when the room reaches 0.5°F below the setpoint and outdoor air is at least 3°F cooler than the room.
+- **Off** when the room reaches 1°F below the setpoint, the outdoor air is at most 1°F cooler than the room, or CoolBot is off, offline, or missing data.
+- **Hold** the current fan state between thresholds.
 
-The 2°F hysteresis (`HYSTERESIS` in `main.py`) ensures the fan doesn't oscillate when temperatures are close to the setpoint.
+At a 45°F CoolBot setpoint, the fan can start at 44.5°F and stops at 44°F. The thresholds follow the active setpoint.
 
 ## Raspberry Pi Access
 

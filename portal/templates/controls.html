@@ -3,7 +3,7 @@
 {% if state %}
 <div class="control-grid">
     {% for target, title, description in (
-        ('fan', 'Ventilation fan', 'Auto uses outdoor temperature and CoolBot readings.'),
+        ('fan', 'Ventilation fan', 'Auto can use cold outdoor air before CoolBot calls for cooling.'),
         ('ems', 'EMS automation', 'Off stops automatic CoolBot setpoint changes and returns charging control to OpenEVSE. CoolBot keeps its current setpoint.'),
         ('charging_policy', 'EV charging policy', 'Binary requests 12 A. Staged selects from 6, 20, 34, and 48 A. Both pause when estimated surplus solar is too low.'))
     %}
