@@ -14,6 +14,17 @@
             <strong>{{ '%.1f' | format(latest.ev_current_a) if numeric(latest.get('ev_current_a')) else '—' }} <small>A</small></strong>
             {% if numeric(latest.get('ev')) %}<span>{{ '%.0f' | format(latest.ev) }} W</span>{% endif %}
         </div>
+        <div class="panel metric watttime">
+            <span>WattTime MOER</span>
+            {% if numeric(latest.get('moer')) %}
+            <strong>{{ '{:,.0f}'.format(latest.moer) }}</strong>
+            <span>lb CO₂/MWh</span>
+            <span class="metric-time">{{ last_sample }} ET{% if stale %} · Stale{% endif %}</span>
+            {% else %}
+            <strong>—</strong>
+            <span>No WattTime reading</span>
+            {% endif %}
+        </div>
         {% for key, label in series.items() if key != 'ev' %}
         <div class="panel metric {{ key }}"><span>{{ label }}</span><strong>{{ '%.2f' | format(latest[key] / 1000) if numeric(latest.get(key)) else '—' }} <small>kW</small></strong></div>
         {% endfor %}

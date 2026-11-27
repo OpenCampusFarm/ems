@@ -42,12 +42,14 @@ h3 { font-size: 1.08rem; }
 .status { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 18px; padding: 13px 16px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 10px; background: #f5f9fa; }
 .status > div { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; font-size: .875rem; }
 .status strong { font-weight: 650; }
-.metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 15px; }
+.metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 15px; }
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
 .metric { border-top: 3px solid var(--accent, #8da2aa); padding: 14px 16px; }
 .metric span { color: var(--muted); font-size: .875rem; }
 .metric strong { display: block; margin-top: 4px; font-size: clamp(1.45rem, 3vw, 2rem); font-variant-numeric: tabular-nums; letter-spacing: -.04em; }
 .metric small { font-size: .9rem; color: var(--muted); letter-spacing: 0; }
+.metric.watttime { --accent: var(--carbon); }
+.metric-time { display: block; }
 .pv { --accent: var(--pv); }
 .grid { --accent: var(--grid); }
 .ev { --accent: var(--ev); }
