@@ -3,7 +3,7 @@
 {% if state %}
 <div class="control-grid">
     {% for target, title, description in (
-        ('fan', 'Ventilation fan', 'Auto can use cold outdoor air before CoolBot calls for cooling.'),
+        ('fan', 'Ventilation fan', none),
         ('ems', 'EMS automation', 'Off stops automatic CoolBot setpoint changes and returns charging control to OpenEVSE. CoolBot keeps its current setpoint.'),
         ('charging_policy', 'EV charging policy', 'Binary requests 12 A. Staged selects from 6, 20, 34, and 48 A. Both pause when estimated surplus solar is too low.'))
     %}
@@ -17,7 +17,13 @@
             <span class="badge">Requested · {{ state[target] | title }}</span>
             {% endif %}
         </div>
+        {% if target == 'fan' %}
+        <p class="muted">Auto tries the fan first. CoolBot still cools as needed.</p>
+        <p class="muted"><strong>Starts</strong> when the room warms to 0.5°F below the CoolBot setting and it’s at least 3°F cooler outside.</p>
+        <p class="muted"><strong>Stops</strong> when the room cools to 1°F below the setting or the outdoor air is no more than 1°F cooler.</p>
+        {% else %}
         <p class="muted">{{ description }}</p>
+        {% endif %}
         {% if target == 'charging_policy' and state.ems == 'off' %}
         <p class="muted">This setting takes effect when EMS automation is on.</p>
         {% endif %}
