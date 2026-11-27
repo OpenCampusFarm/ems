@@ -238,13 +238,16 @@ def _ensure_client() -> CoolBotClient:
     return _client
 
 
-def change_setpoint(temperature: int) -> None:
+def change_setpoint(temperature: int) -> bool:
+    """Report whether the target was sent over the CoolBot connection."""
     try:
         client = _ensure_client()
         asyncio.run_coroutine_threadsafe(client.set_temp(temperature), _loop).result(timeout=10)
-        print(f"[CoolBot] Setpoint → {temperature}°F")
+        print(f"[CoolBot] Requested setpoint → {temperature}°F")
+        return True
     except Exception as e:
         print(f"[CoolBot] change_setpoint failed: {e}")
+        return False
 
 
 def get_room_temp() -> float | None:

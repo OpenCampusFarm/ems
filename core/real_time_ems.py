@@ -5,8 +5,7 @@ Decision logic (every POLL_INTERVAL seconds):
   1. Read SolArk inverter: PV watts, grid watts
   2. Read WattTime grid MOER (lbs CO2/MWh)
   3. "Clean" if PV is producing (>= PV_MIN_WATTS) OR grid MOER < CO2_CLEAN_THRESHOLD
-  4. If clean  → CoolBot setpoint = SETPOINT_COOLTH
-     If dirty  → CoolBot setpoint = SETPOINT_ECON
+  4. Apply the matching CoolBot target from system.db (defaults 45°F/50°F)
   5. Use the charging policy selected in system.db to set the EV current
      that estimated surplus solar can cover.
   EV charging is controlled on the OpenEVSE charger via an EVSE claim (soft control),
@@ -16,6 +15,7 @@ Decision logic (every POLL_INTERVAL seconds):
 import logging
 import os
 import signal
+import sqlite3
 import sys
 import threading
 import time
@@ -59,11 +59,6 @@ PV_MIN_WATTS = 500.0
 _wt_token: str | None = None
 _wt_token_ts: float = 0.0
 _WT_TOKEN_TTL = 25 * 60
-
-# ── CoolBot setpoints ─────────────────────────────────────────────────────────
-SETPOINT_COOLTH = 45  # °F — low setpoint (clean energy)
-SETPOINT_ECON = 50  # °F — high setpoint (dirty energy)
-SETPOINT_DEFAULT = 48  # °F — neutral fallback
 
 # ── Polling ───────────────────────────────────────────────────────────────────
 POLL_INTERVAL = 300  # seconds
@@ -179,12 +174,24 @@ def get_egauge_data() -> dict | None:
 
 # ── EMS decision ─────────────────────────────────────────────────────────────
 
-_current_setpoint: int = SETPOINT_DEFAULT
+_last_requested_setpoint: int | None = None
+
+
+def apply_coolbot_target(energy_clean: bool) -> None:
+    global _last_requested_setpoint
+    try:
+        state = read_state()
+    except (OSError, ValueError, sqlite3.Error):
+        log.exception("[CoolBot] Unable to read target settings")
+        return
+    if _stop.is_set() or state["ems"] == "off":
+        return
+    target = state["coolbot_clean_f"] if energy_clean else state["coolbot_other_f"]
+    if target != _last_requested_setpoint and change_setpoint(target):
+        _last_requested_setpoint = target
 
 
 def run_ems_cycle(policy: str) -> None:
-    global _current_setpoint
-
     power = get_power_data()
     if power is None:
         log.warning("[EMS] Inverter data unavailable — skipping cycle")
@@ -245,13 +252,7 @@ def run_ems_cycle(policy: str) -> None:
     if _stop.is_set():
         return
 
-    new_setpoint = SETPOINT_COOLTH if energy_clean else SETPOINT_ECON
-    if new_setpoint != _current_setpoint:
-        change_setpoint(new_setpoint)
-        _current_setpoint = new_setpoint
-        log.info("[CoolBot] Setpoint → %d°F", new_setpoint)
-    else:
-        log.info("[CoolBot] Setpoint unchanged at %d°F", _current_setpoint)
+    apply_coolbot_target(energy_clean)
 
     if _stop.is_set():
         return

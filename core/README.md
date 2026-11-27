@@ -23,7 +23,7 @@ Every `POLL_INTERVAL` seconds (default 300s):
 
 1. Read SolArk inverter — PV watts, grid watts
 2. Read WattTime — grid carbon intensity (MOER, lbs CO₂/MWh)
-3. Set CoolBot to 45°F if PV is at least 500 W or MOER is below 1400 lbs CO₂/MWh. Otherwise use 50°F.
+3. Use the CoolBot clean-energy target (default 45°F) if PV is at least 500 W or MOER is below 1400 lbs CO₂/MWh. Otherwise use the other target (default 50°F). The portal saves both values in `system.db` and core reads them each cycle.
 4. Estimate surplus solar by subtracting the non-EV load from SolArk's PV output. Apply the saved EV charging policy.
 
 (Each cycle also logs eGauge grid / CoolBot / EV power for monitoring; it does not affect the decision.)

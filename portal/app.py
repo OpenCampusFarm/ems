@@ -22,7 +22,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from power_flow import (
     CARBON_SERIES, DEFAULT_PERIOD, FARM_TIME, GAP, PERIODS, SERIES, build_chart, chart_buckets,
 )
-from system_state import DATABASE, MODES, mark_applied, read_state, save_mode
+from system_state import (
+    COOLBOT_MAX_F, COOLBOT_MIN_F, DATABASE, MODES, mark_applied, read_state,
+    save_coolbot_targets, save_mode,
+)
 from telemetry_store import LEGACY_TELEMETRY, TELEMETRY_DB, numeric, read_carbon, read_dashboard
 
 log = logging.getLogger(__name__)
@@ -131,12 +134,38 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *, legacy=
             state = None
             error = "Controller settings are unavailable. Check system.db."
         return render_template("controls.html", state=state, modes=MODES, demo=demo,
+                               coolbot_min=COOLBOT_MIN_F, coolbot_max=COOLBOT_MAX_F,
                                csrf=csrf_token(), message=message, error=error)
+
+    def controls_response(message=None, error=None):
+        cards = controller_cards(message, error)
+        if request.headers.get("HX-Request") == "true":
+            return cards
+        return render_template("index.html", controls=cards, monitoring=monitoring(),
+                               demo=demo, csrf=csrf_token())
 
     @app.get("/")
     def index():
         return render_template("index.html", controls=controller_cards(), monitoring=monitoring(),
                                demo=demo, csrf=csrf_token())
+
+    @app.post("/coolbot/targets")
+    def set_coolbot_targets():
+        verify_csrf()
+        try:
+            clean_f = int(request.form.get("clean_f", ""))
+            other_f = int(request.form.get("other_f", ""))
+        except ValueError:
+            return controls_response(error="Enter both CoolBot temperatures in whole degrees Fahrenheit.")
+        try:
+            save_coolbot_targets(clean_f, other_f, database)
+        except ValueError as error:
+            return controls_response(error=str(error))
+        except (OSError, sqlite3.Error):
+            log.exception("[Portal] Unable to save CoolBot targets")
+            return controls_response(error="Could not save the CoolBot targets.")
+        log.info("[Portal] CoolBot targets saved: clean=%d°F, otherwise=%d°F", clean_f, other_f)
+        return controls_response(message="CoolBot targets saved. EMS uses them on its next cycle while automation is on.")
 
     @app.post("/mode/<target>")
     def set_mode(target):
@@ -147,18 +176,11 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *, legacy=
         label = CONTROL_LABELS[target]
         display_mode = mode.title()
 
-        def result(message=None, error=None):
-            cards = controller_cards(message, error)
-            if request.headers.get("HX-Request") == "true":
-                return cards
-            return render_template("index.html", controls=cards, monitoring=monitoring(),
-                                   demo=demo, csrf=csrf_token())
-
         try:
             with database.with_name(database.name + ".lock").open("a") as lock_file:
                 fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 if not save_mode(target, mode, database):
-                    return result(message=f"{label} is already set to {display_mode}.")
+                    return controls_response(message=f"{label} is already set to {display_mode}.")
                 try:
                     process_target, process_mode = target, mode
                     if target == "charging_policy":
@@ -171,17 +193,17 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *, legacy=
                     mark_applied(target, database)
                 except (OSError, ValueError, HTTPException, RPCError, sqlite3.Error):
                     log.exception("[Portal] Unable to apply %s %s", label, mode)
-                    return result(error=f"{label} was saved. The process change could not be confirmed. Retry to apply it.")
+                    return controls_response(error=f"{label} was saved. The process change could not be confirmed. Retry to apply it.")
         except BlockingIOError:
-            return result(error="A mode change is in progress. Try again shortly.")
+            return controls_response(error="A mode change is in progress. Try again shortly.")
         except (OSError, sqlite3.Error):
             log.exception("[Portal] Unable to save %s %s", label, mode)
-            return result(error=f"Could not save {label.lower()}.")
+            return controls_response(error=f"Could not save {label.lower()}.")
         if saved_for_later:
             log.info("[Portal] Charging policy saved while EMS is off: %s", mode)
-            return result(message=f"{label} saved as {display_mode}. It will be used when EMS is on.")
+            return controls_response(message=f"{label} saved as {display_mode}. It will be used when EMS is on.")
         log.info("[Portal] %s applied: %s", label, mode)
-        return result(message=f"{label} applied: {display_mode}.")
+        return controls_response(message=f"{label} applied: {display_mode}.")
 
     @app.get("/monitoring")
     def monitoring():
