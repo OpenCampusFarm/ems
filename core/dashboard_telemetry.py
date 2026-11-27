@@ -9,7 +9,7 @@ from telemetry_store import record_samples
 log = logging.getLogger(__name__)
 
 
-def publish(power, egauge, ev, room_temp, moer, policy):
+def publish(power, egauge, ev, room_temp, moer, policy, *, coolbot_setpoint_f=None):
     sample = {
         "ts": time.time(),
         "pv": power["pv"],
@@ -17,6 +17,7 @@ def publish(power, egauge, ev, room_temp, moer, policy):
         "ev": ev["power_w"] if ev else None,
         "ev_current_a": ev.get("current_a") if ev else None,
         "room": room_temp,
+        "coolbot_setpoint_f": coolbot_setpoint_f,
         "moer": moer,
         "ev_state": str(ev["state"]) if ev else None,
         "policy": policy,

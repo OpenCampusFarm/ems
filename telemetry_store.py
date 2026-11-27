@@ -19,7 +19,7 @@ KG_PER_LB = 0.45359237
 
 log = logging.getLogger(__name__)
 
-NUMERIC_FIELDS = ("pv", "grid", "ev", "room", "moer", "ev_current_a")
+NUMERIC_FIELDS = ("pv", "grid", "ev", "room", "moer", "ev_current_a", "coolbot_setpoint_f")
 TEXT_FIELDS = ("ev_state", "policy")
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples (
@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS samples (
     moer REAL,
     ev_state TEXT,
     policy TEXT,
-    ev_current_a REAL
+    ev_current_a REAL,
+    coolbot_setpoint_f REAL
 ) WITHOUT ROWID
 """
 CARBON_SCHEMA = """
@@ -43,8 +44,10 @@ CREATE TABLE IF NOT EXISTS carbon_samples (
 ) WITHOUT ROWID
 """
 INSERT = """
-INSERT OR REPLACE INTO samples (ts, pv, grid, ev, room, moer, ev_current_a, ev_state, policy)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT OR REPLACE INTO samples (
+    ts, pv, grid, ev, room, moer, ev_current_a, coolbot_setpoint_f, ev_state, policy
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -86,8 +89,10 @@ def _begin_write(db, legacy, cutoff):
         db.execute(CARBON_SCHEMA)
     if 1 <= version < 3:
         db.execute("ALTER TABLE samples ADD COLUMN ev_current_a REAL")
-    if version < 3:
-        db.execute("PRAGMA user_version=3")
+    if 1 <= version < 4:
+        db.execute("ALTER TABLE samples ADD COLUMN coolbot_setpoint_f REAL")
+    if version < 4:
+        db.execute("PRAGMA user_version=4")
 
 
 def record_samples(samples, path=TELEMETRY_DB, legacy=LEGACY_TELEMETRY, *, now=None):

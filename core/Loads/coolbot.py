@@ -259,8 +259,12 @@ def get_room_temp() -> float | None:
 
 
 def get_coolbot_temp() -> float | None:
+    """Return the last setpoint reported over the active CoolBot connection."""
     try:
-        return _ensure_client().set_temp_f
+        client = _ensure_client()
+        if client.hw_online is False or client._listen_task is None or client._listen_task.done():
+            return None
+        return client.set_temp_f
     except Exception as e:
         print(f"[CoolBot] get_coolbot_temp failed: {e}")
         return None

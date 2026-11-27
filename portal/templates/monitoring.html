@@ -28,7 +28,11 @@
         {% for key, label in series.items() if key != 'ev' %}
         <div class="panel metric {{ key }}"><span>{{ label }}</span><strong>{{ '%.2f' | format(latest[key] / 1000) if numeric(latest.get(key)) else '—' }} <small>kW</small></strong></div>
         {% endfor %}
-        <div class="panel metric room"><span>Cooler temperature</span><strong>{{ '%.1f' | format(latest.room) if numeric(latest.get('room')) else '—' }} <small>°F</small></strong></div>
+        <div class="panel metric room"><span>Cool room temperature</span><strong>{{ '%.1f' | format(latest.room) if numeric(latest.get('room')) else '—' }} <small>°F</small></strong></div>
+        <div class="panel metric setpoint">
+            <span>CoolBot setpoint</span>
+            <strong>{{ '%g' | format(latest.coolbot_setpoint_f) if numeric(latest.get('coolbot_setpoint_f')) else '—' }} <small>°F</small></strong>
+        </div>
     </div>
     <section class="panel chart">
         <div class="panel-heading"><h2>Power flow</h2><span class="muted">W · {{ period.summary }} · ET</span></div>

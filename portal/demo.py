@@ -19,7 +19,7 @@ def _sample(stamp):
     return {
         "ts": stamp,
         "pv": solar, "grid": 600 + ev - solar, "ev": ev, "ev_current_a": ev / 240,
-        "room": 44 + 1.4 * math.sin(hour / 4), "moer": 1040,
+        "room": 44 + 1.4 * math.sin(hour / 4), "coolbot_setpoint_f": 45, "moer": 1040,
         "policy": "staged", "ev_state": "charging" if ev else "idle",
     }
 

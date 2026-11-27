@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 from dashboard_telemetry import publish
 from system_state import read_state
 
-from Loads.coolbot import change_setpoint, get_room_temp
+from Loads.coolbot import change_setpoint, get_coolbot_temp, get_room_temp
 from Loads.openevse import get_status as get_ev_status
 from Loads.openevse import release_claim, set_charging
 from egauge_client import EGaugeClient
@@ -233,7 +233,8 @@ def run_ems_cycle(policy: str) -> None:
             ev_data["power_w"],
         )
 
-    publish(power, egauge, ev_data, room_temp, moer, policy)
+    publish(power, egauge, ev_data, room_temp, moer, policy,
+            coolbot_setpoint_f=get_coolbot_temp())
 
     pv_producing = pv_w >= PV_MIN_WATTS
     grid_clean = moer is not None and moer < CO2_CLEAN_THRESHOLD
