@@ -13,11 +13,9 @@ if (connectionAlert) {
 
 document.body.addEventListener("input", ({ target }) => {
     if (target.id !== "ev-current-slider") return;
-    // The first slider position is a pause. Charging starts at the next step (6 A).
-    const amps = target.value === target.min ? 0 : target.valueAsNumber;
-    target.form.elements.amps.value = amps;
-    target.setAttribute("aria-valuetext", amps ? `${amps} A` : "0 A (pause)");
-    document.getElementById("ev-current-value").value = `${amps} A`;
+    const label = `${target.value} A`;
+    target.setAttribute("aria-valuetext", label);
+    document.getElementById("ev-current-value").value = label;
 });
 
 const chartTime = new Intl.DateTimeFormat("en-US", {

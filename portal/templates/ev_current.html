@@ -2,7 +2,7 @@
     {% if current_error %}<p class="notice error" role="alert">{{ current_error }}</p>{% endif %}
     {% if state and state.ems == 'on' %}
     {% set amps = charger_amps if charger_amps is not none else state.ev_manual_amps %}
-    {% set current_label = (amps ~ ' A') if amps is not none else '—' %}
+    {% set current_label = (amps ~ ' A') if amps else ('Pause requested' if amps == 0 else '—') %}
     <form method="post" action="{{ url_for('set_ev_current') }}"
           hx-post="{{ url_for('set_ev_current') }}" hx-trigger="submit, change from:#ev-current-slider"
           hx-target="#ev-current-control" hx-swap="outerHTML"
@@ -13,14 +13,16 @@
                 <label for="ev-current-slider">Requested current</label>
                 <output id="ev-current-value" for="ev-current-slider">{{ current_label }}</output>
             </div>
-            <input type="hidden" name="amps" value="{{ amps if amps is not none else 0 }}">
             <div class="ev-current-track">
-                <span aria-hidden="true">0 A</span>
-                <input id="ev-current-slider" type="range" min="{{ ev_min - 1 }}" max="{{ ev_max }}" step="1"
-                       value="{{ amps or ev_min - 1 }}" aria-valuetext="{{ current_label if amps is not none else 'Current unavailable' }}">
+                <span aria-hidden="true">{{ ev_min }} A</span>
+                <input id="ev-current-slider" name="amps" type="range" min="{{ ev_min }}" max="{{ ev_max }}" step="1"
+                       value="{{ amps or ev_min }}" aria-valuetext="{{ amps or ev_min }} A">
                 <span aria-hidden="true">{{ ev_max }} A</span>
             </div>
-            <button class="retry" type="submit" name="mode" value="pause">Pause charging</button>
+            <div class="ev-current-actions">
+                {% if not amps %}<button class="retry" type="submit" name="mode" value="minimum">Charge at {{ ev_min }} A</button>{% endif %}
+                <button class="retry" type="submit" name="mode" value="pause">Pause charging</button>
+            </div>
         </fieldset>
         <p class="applying" role="status">Requesting current…</p>
     </form>
@@ -29,7 +31,7 @@
         Could not read the current from OpenEVSE.{% if amps is not none %} Showing the last saved setting.{% endif %}
         {% endif %}
         {% if state.ev_manual_amps is none %}{{ state.charging_policy | title }} stays active until you set a current. {% endif %}
-        Release the slider to apply. 0 A pauses charging. OpenEVSE limits apply.
+        Release the slider to apply. OpenEVSE limits apply.
     </p>
     {% endif %}
 </div>

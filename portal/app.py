@@ -261,10 +261,16 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
         verify_csrf()
         error = None
         try:
-            try:
-                amps = 0 if request.form.get("mode") == "pause" else int(request.form.get("amps", ""))
-            except ValueError:
-                raise ValueError(f"Choose 0 A to pause or {EV_MIN_A}–{EV_MAX_A} A to charge.") from None
+            mode = request.form.get("mode")
+            if mode == "pause":
+                amps = 0
+            elif mode == "minimum":
+                amps = EV_MIN_A
+            else:
+                try:
+                    amps = int(request.form.get("amps", ""))
+                except ValueError:
+                    raise ValueError(f"Choose a current between {EV_MIN_A} and {EV_MAX_A} A.") from None
             with database.with_name(database.name + ".lock").open("a") as lock_file:
                 fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 with ev_control_lock(database), edit_ev_current(amps, database):
