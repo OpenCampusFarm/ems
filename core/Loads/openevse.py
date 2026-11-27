@@ -1,10 +1,10 @@
 """
 OpenEVSE charger control over the local HTTP API (mDNS: http://openevse.local).
 
-Charging is controlled with the *EVSE Claim* API (soft control), NOT the manual
-override. A claim made through the HTTP API has priority 500, which is lower
-than the manual override (priority 1000) used by the charger's LCD / web UI, so
-a person at the charger can always override the EMS.
+Charging is controlled with the *EVSE Claim* API (soft control). A claim made
+through the HTTP API has priority 500. The charger's LCD and web UI use the
+manual override at priority 1000. Resuming a pause from the Portal clears that
+override after setting the new charging current.
 
   POST   /claims/<client_id>   {"state": "active" | "disabled", "auto_release": true}
                               Active claims can also specify "charge_current" in amps.
@@ -114,6 +114,30 @@ def set_charging(enabled: bool, amps: int | None = None) -> dict:
     """Allow charging at the requested current, or block it via an EVSE claim."""
     body = claim_body(enabled, amps)
     return _request("POST", f"/claims/{OPENEVSE_CLAIM_ID}", json=body).json()
+
+
+def resume_charging(amps: int) -> None:
+    """Resume at the requested rate and release the charger's manual override."""
+    try:
+        override = _request("GET", "/override", timeout=3).json()
+    except requests.HTTPError as error:
+        if error.response is None or error.response.status_code != 404:
+            raise
+        override = {}
+    if not isinstance(override, dict):
+        raise requests.RequestException("Unexpected OpenEVSE manual override response")
+
+    try:
+        # Have the new EMS rate in place before releasing the higher-priority override.
+        set_charging(True, amps)
+        if override:
+            _request("DELETE", "/override", timeout=3)
+    except requests.RequestException:
+        try:
+            set_charging(False)
+        except requests.RequestException:
+            log.exception("[EV] Unable to restore the pause after a failed resume")
+        raise
 
 
 def release_claim() -> None:

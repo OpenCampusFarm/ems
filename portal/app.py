@@ -76,7 +76,7 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             "Set PORTAL_PASSWORD and a random PORTAL_SECRET_KEY of at least 32 characters in portal/.env"
         )
     if not demo:
-        from Loads.openevse import get_requested_current, set_charging
+        from Loads.openevse import get_requested_current, resume_charging, set_charging
 
     app.config.update(
         SECRET_KEY=secret_key,
@@ -273,9 +273,14 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
                     raise ValueError(f"Choose a current between {EV_MIN_A} and {EV_MAX_A} A.") from None
             with database.with_name(database.name + ".lock").open("a") as lock_file:
                 fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                with ev_control_lock(database), edit_ev_current(amps, database):
-                    if not demo:
-                        set_charging(amps > 0, amps)
+                with ev_control_lock(database):
+                    previous = read_state(database)["ev_manual_amps"] if amps > 0 and not demo else None
+                    with edit_ev_current(amps, database):
+                        if not demo:
+                            if amps > 0 and (previous == 0 or (previous is None and get_requested_current() == 0)):
+                                resume_charging(amps)
+                            else:
+                                set_charging(amps > 0, amps)
             log.info("[Portal] Manual EV charging requested %d A", amps)
         except BlockingIOError:
             error = "A mode change is in progress. Try again shortly."

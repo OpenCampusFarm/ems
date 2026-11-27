@@ -31,7 +31,7 @@
         Could not read the current from OpenEVSE.{% if amps is not none %} Showing the last saved setting.{% endif %}
         {% endif %}
         {% if state.ev_manual_amps is none %}{{ state.charging_policy | title }} stays active until you set a current. {% endif %}
-        Release the slider to apply. OpenEVSE limits apply.
+        Release the slider to apply. {% if amps == 0 %}Resuming clears the Manual override in OpenEVSE.{% endif %} OpenEVSE limits apply.
     </p>
     {% endif %}
 </div>
