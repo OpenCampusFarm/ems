@@ -1,19 +1,41 @@
 {% from 'reading_chart.html' import plot %}
-{% macro meter_card(key, label, unit) %}
+{% macro meter_card(key, label, value, unit, source=None) %}
 <div class="panel metric {{ key }}">
     <span>{{ label }}</span>
-    {% if numeric(latest.get(key)) %}
-    <span class="metric-detail">{{ latest.get(key ~ '_source') or meter_sources[key] }}</span>
+    {% if numeric(value) and source %}
+    <span class="metric-detail">{{ source }}</span>
     {% endif %}
     <div class="metric-reading">
-        {% if numeric(latest.get(key)) %}
-        <strong>{{ ('%.3f' | format(latest[key] / 1000)) if unit == 'W'
-                   else (('%.3f' if unit == 'Hz' else '%.1f') | format(latest[key])) }}</strong>
-        {% else %}
+        {% if not numeric(value) %}
         <strong>—</strong>
+        {% elif unit == 'kW' %}
+        <strong>{{ '%.3f' | format(value / 1000) }}</strong>
+        {% elif unit == 'W' %}
+        <strong>{{ '{:,.0f}'.format(value) }}</strong>
+        {% else %}
+        <strong>{{ '%.1f' | format(value) }}</strong>
         {% endif %}
-        <small>{{ 'kW' if unit == 'W' else unit }}</small>
+        <small>{{ unit }}</small>
     </div>
+</div>
+{% endmacro %}
+{% macro chart_panel(chart, view, viewport_id, note=None) %}
+<div class="panel chart">
+    <div class="panel-heading">
+        <h3>{{ view.label }}</h3><span class="muted">{{ view.unit }} · {{ period.summary }} · ET</span>
+    </div>
+    {% if caller is defined %}{{ caller() }}{% endif %}
+    {% if chart.available %}
+    {{ plot(chart, view, viewport_id) }}
+    <div class="chart-footer">
+        <ul class="legend">
+            {% for key, label in view.series.items() if chart.paths[key] %}<li class="{{ key }}">{{ label }}</li>{% endfor %}
+        </ul>
+        {% if note %}<span class="muted">{{ note }}</span>{% endif %}
+    </div>
+    {% else %}
+    <div class="empty"><strong>No readings in this time range</strong></div>
+    {% endif %}
 </div>
 {% endmacro %}
 <div id="monitoring" hx-get="{{ url_for('monitoring', range=selected, view=selected_view) }}"
@@ -26,79 +48,81 @@
     </div>
     {% if unavailable %}<p class="notice error" role="status">Telemetry is temporarily unavailable.</p>{% endif %}
     {% if stale %}<p class="notice">Showing the last recorded measurements. The EMS has not published a sample in over 12 minutes.</p>{% endif %}
-    <div class="metrics">
-        {{ meter_card('ev_current_a', views.current.series.ev_current_a, 'A') }}
-        <div class="panel metric watttime">
-            <span>WattTime MOER</span>
-            {% if numeric(latest.get('moer')) %}
-            <span class="metric-detail">{{ last_sample }} ET{% if stale %} · Stale{% endif %}</span>
-            {% else %}
-            <span class="metric-detail">No WattTime reading</span>
-            {% endif %}
-            <div class="metric-reading">
-                <strong>{{ '{:,.0f}'.format(latest.moer) if numeric(latest.get('moer')) else '—' }}</strong>
-                <small>lb&nbsp;CO₂<wbr>/MWh</small>
+    <section class="monitoring-group" aria-labelledby="overview-heading">
+        <h2 id="overview-heading">Farm overview</h2>
+        <div class="metrics">
+            {{ meter_card('ev_current_a', 'OpenEVSE charge current',
+                          latest.get('ev_current_a') if latest.get('ev_current_a_source') in [none, 'OpenEVSE'] else none, 'A') }}
+            <div class="panel metric watttime">
+                <span>WattTime MOER</span>
+                {% if numeric(latest.get('moer')) %}
+                <span class="metric-detail">{{ last_sample }} ET{% if stale %} · Stale{% endif %}</span>
+                {% else %}
+                <span class="metric-detail">No WattTime reading</span>
+                {% endif %}
+                <div class="metric-reading">
+                    <strong>{{ '{:,.0f}'.format(latest.moer) if numeric(latest.get('moer')) else '—' }}</strong>
+                    <small>lb&nbsp;CO₂<wbr>/MWh</small>
+                </div>
             </div>
-        </div>
-        {{ meter_card('pv', views.power.series.pv, 'W') }}
-        {{ meter_card('grid', views.power.series.grid, 'W') }}
-        {% for key, label, field, pattern in (
-            ('room', 'Cool room temperature', 'room_f', '%.1f'),
-            ('setpoint', 'CoolBot setpoint', 'setpoint_f', '%g')
-        ) %}
-        <div class="panel metric {{ key }}">
-            <span>{{ label }}</span>
-            {% if coolbot_last_read %}
-            <span class="metric-detail">Last read {{ coolbot_last_read }} ET</span>
-            {% elif not coolbot %}
-            <span class="metric-detail">Waiting for CoolBot</span>
-            {% endif %}
-            <div class="metric-reading">
-                <strong>{{ pattern | format(coolbot[field]) if coolbot and numeric(coolbot[field]) else '—' }}</strong>
-                <small>°F</small>
+            {{ meter_card('pv', overview_view.series.pv, latest.get('pv'), 'kW', 'Sol-Ark') }}
+            {{ meter_card('grid', overview_view.series.grid, latest.get('grid'), 'kW', latest.get('grid_source') or 'eGauge') }}
+            {% for key, label, field, pattern in (
+                ('room', 'Cool room temperature', 'room_f', '%.1f'),
+                ('setpoint', 'CoolBot setpoint', 'setpoint_f', '%g')
+            ) %}
+            <div class="panel metric {{ key }}">
+                <span>{{ label }}</span>
+                {% if coolbot_last_read %}
+                <span class="metric-detail">Last read {{ coolbot_last_read }} ET</span>
+                {% elif not coolbot %}
+                <span class="metric-detail">Waiting for CoolBot</span>
+                {% endif %}
+                <div class="metric-reading">
+                    <strong>{{ pattern | format(coolbot[field]) if coolbot and numeric(coolbot[field]) else '—' }}</strong>
+                    <small>°F</small>
+                </div>
             </div>
-        </div>
-        {% endfor %}
-        {% for meter_view in views.values() %}
-            {% for key, label in meter_view.series.items() if key not in ['pv', 'grid', 'ev_current_a'] %}
-            {{ meter_card(key, label, meter_view.unit) }}
             {% endfor %}
-        {% endfor %}
-    </div>
-    <section class="panel chart">
-        <div class="panel-heading"><h2>Electrical readings</h2><span class="muted">{{ view.unit }} · {{ period.summary }} · ET</span></div>
-        <nav class="periods" aria-label="Chart time range">
-            {% for key, option in periods.items() %}
-            <a id="power-period-{{ key }}" href="{{ url_for('index', range=key, view=selected_view) }}"
-               hx-get="{{ url_for('monitoring', range=key, view=selected_view) }}" hx-target="#monitoring"
-               hx-swap="outerHTML" hx-sync="#monitoring:replace" hx-replace-url="{{ url_for('index', range=key, view=selected_view) }}"
-               {% if key == selected %}aria-current="true"{% endif %}>{{ option.label }}</a>
-            {% endfor %}
-        </nav>
-        <nav class="periods" aria-label="Electrical measurement type">
-            {% for key, option in views.items() %}
-            <a href="{{ url_for('index', range=selected, view=key) }}"
-               hx-get="{{ url_for('monitoring', range=selected, view=key) }}" hx-target="#monitoring"
-               hx-swap="outerHTML" hx-sync="#monitoring:replace" hx-replace-url="{{ url_for('index', range=selected, view=key) }}"
-               {% if key == selected_view %}aria-current="true"{% endif %}>{{ option.label }}</a>
-            {% endfor %}
-        </nav>
-        {% if chart.available %}
-        {{ plot(chart, view, 'power-chart-viewport') }}
-        <div class="chart-footer">
-            <ul class="legend">
-                {% for key, label in view.series.items() if chart.paths[key] %}<li class="{{ key }}">{{ label }}</li>{% endfor %}
-            </ul>
-            {% if selected_view == 'power' %}
-            <span class="muted">Negative grid power = export. Negative battery power = charging.</span>
-            {% endif %}
         </div>
-        {% else %}
-        <div class="empty">
-            {% if latest %}<strong>No {{ view.label | lower }} readings in this time range</strong>
-            {% else %}<strong>Waiting for EMS telemetry</strong><span>Measurements appear after the EMS completes a cycle.</span>{% endif %}
+        {% call chart_panel(overview, overview_view, 'power-chart-viewport', 'Negative grid power = export.') %}
+            <nav class="periods" aria-label="Chart time range">
+                {% for key, option in periods.items() %}
+                <a id="power-period-{{ key }}" href="{{ url_for('index', range=key, view=selected_view) }}"
+                   hx-get="{{ url_for('monitoring', range=key, view=selected_view) }}" hx-target="#monitoring"
+                   hx-swap="outerHTML" hx-sync="#monitoring:replace" hx-replace-url="{{ url_for('index', range=key, view=selected_view) }}"
+                   {% if key == selected %}aria-current="true"{% endif %}>{{ option.label }}</a>
+                {% endfor %}
+            </nav>
+        {% endcall %}
+    </section>
+    <section class="monitoring-group" aria-labelledby="solark-heading">
+        <h2 id="solark-heading">Sol-Ark</h2>
+        <div class="metrics solark-metrics">
+            {{ meter_card('inverter_load_w', 'Inverter load', latest.get('inverter_load_w'), 'kW') }}
+            {{ meter_card('battery_w', 'Stationary battery power', latest.get('battery_w'), 'kW') }}
+            {{ meter_card('battery_soc', 'Stationary battery charge', latest.get('battery_soc'), '%') }}
         </div>
-        {% endif %}
+        {% call chart_panel(solark, solark_view, 'solark-chart-viewport',
+                           'Negative battery power = charging.' if selected_view == 'power' else none) %}
+            <nav class="periods" aria-label="Sol-Ark chart reading">
+                {% for key, label in [('power', 'Power'), ('charge', 'Battery charge')] %}
+                <a href="{{ url_for('index', range=selected, view=key) }}"
+                   hx-get="{{ url_for('monitoring', range=selected, view=key) }}" hx-target="#monitoring"
+                   hx-swap="outerHTML" hx-sync="#monitoring:replace" hx-replace-url="{{ url_for('index', range=selected, view=key) }}"
+                   {% if key == selected_view %}aria-current="true"{% endif %}>{{ label }}</a>
+                {% endfor %}
+            </nav>
+        {% endcall %}
+    </section>
+    <section class="monitoring-group" aria-labelledby="egauge-heading">
+        <h2 id="egauge-heading">eGauge</h2>
+        <div class="metrics egauge-metrics">
+            {% for key, label in egauge_view.series.items() if key != 'egauge_grid_w' %}
+            {{ meter_card(key, label, latest.get(key), 'W') }}
+            {% endfor %}
+        </div>
+        {{ chart_panel(egauge, egauge_view, 'egauge-chart-viewport', 'Negative grid power = export.') }}
     </section>
     <section class="panel chart carbon-chart">
         <div class="panel-heading"><h2>Estimated CO₂ avoided</h2><span class="muted">kg/h · {{ period.summary }} · ET</span></div>

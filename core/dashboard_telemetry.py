@@ -53,7 +53,7 @@ def build_sample(power, egauge, ev, room_temp, moer, policy, *, coolbot_setpoint
     grid = _reading(egauge.get("grid_power"))
     solark_grid = _grid_watts(power)
     ev_w = _magnitude(egauge.get("evcharger_power"))
-    ev_a = _magnitude(egauge.get("evcharger_current"))
+    ev_a = _reading(ev.get("current_a"))
     temperature_c = egauge.get("internal_temperature_c")
     meter_hz = next((
         rate for rate in (egauge.get("l1_frequency"), egauge.get("l2_frequency"))
@@ -66,10 +66,8 @@ def build_sample(power, egauge, ev, room_temp, moer, policy, *, coolbot_setpoint
         "grid_source": "eGauge" if grid is not None else "Sol-Ark" if solark_grid is not None else None,
         "ev": _reading(ev_w, ev.get("power_w")),
         "ev_source": "eGauge" if ev_w is not None else "OpenEVSE" if numeric(ev.get("power_w")) else None,
-        "ev_current_a": _reading(ev_a, ev.get("current_a")),
-        "ev_current_a_source": (
-            "eGauge" if ev_a is not None else "OpenEVSE" if numeric(ev.get("current_a")) else None
-        ),
+        "ev_current_a": ev_a,
+        "ev_current_a_source": "OpenEVSE" if ev_a is not None else None,
         "battery_w": _battery_watts(power),
         "battery_soc": power.get("soc"),
         "inverter_load_w": power.get("load"),

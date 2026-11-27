@@ -21,7 +21,7 @@ from process_control import apply_mode, service_status
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from power_flow import (
-    CARBON_VIEW, DEFAULT_PERIOD, DEFAULT_VIEW, FARM_TIME, GAP, METER_SOURCES, PERIODS, VIEWS,
+    CARBON_VIEW, DEFAULT_PERIOD, EGAUGE_VIEW, FARM_TIME, GAP, OVERVIEW_VIEW, PERIODS, SOLARK_VIEWS,
     build_chart, chart_buckets,
 )
 from system_state import (
@@ -218,10 +218,10 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
         if key not in PERIODS:
             key = DEFAULT_PERIOD
         period = PERIODS[key]
-        selected_view = request.args.get("view", DEFAULT_VIEW)
-        if selected_view not in VIEWS:
-            selected_view = DEFAULT_VIEW
-        view = VIEWS[selected_view]
+        selected_view = request.args.get("view", "power")
+        if selected_view not in SOLARK_VIEWS:
+            selected_view = "power"
+        solark_view = SOLARK_VIEWS[selected_view]
         now = time.time()
         start = now - period.duration
         buckets = chart_buckets(start, now, period.bucket)
@@ -246,9 +246,12 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             else None
         )
         return render_template(
-            "monitoring.html", latest=latest, chart=build_chart(rows, now, period, view),
+            "monitoring.html", latest=latest,
+            overview=build_chart(rows, now, period, OVERVIEW_VIEW), overview_view=OVERVIEW_VIEW,
+            solark=build_chart(rows, now, period, solark_view), solark_view=solark_view,
+            egauge=build_chart(rows, now, period, EGAUGE_VIEW), egauge_view=EGAUGE_VIEW,
             carbon=build_chart(carbon_rows, now, period, CARBON_VIEW), carbon_view=CARBON_VIEW,
-            views=VIEWS, view=view, selected_view=selected_view, meter_sources=METER_SOURCES,
+            selected_view=selected_view,
             periods=PERIODS, selected=key, period=period, unavailable=unavailable,
             last_sample=datetime.fromtimestamp(latest["ts"], FARM_TIME).strftime("%b %d, %H:%M")
             if latest else None,

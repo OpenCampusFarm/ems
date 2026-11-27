@@ -42,7 +42,11 @@ h3 { font-size: 1.08rem; }
 .status { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 18px; padding: 13px 16px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 10px; background: #f5f9fa; }
 .status > div { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; font-size: .875rem; }
 .status strong { font-weight: 650; }
-.metrics { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 15px; }
+.monitoring-group + .monitoring-group { margin-top: 26px; }
+.monitoring-group > h2 { margin-bottom: 9px; }
+.metrics { display: grid; grid-template-columns: repeat(var(--metric-columns, 6), minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
+.solark-metrics { --metric-columns: 3; }
+.egauge-metrics { --metric-columns: 4; }
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; }
 .metric { display: flex; flex-direction: column; border-top: 3px solid var(--accent, #8da2aa); padding: 14px 16px; }
 .metric span { color: var(--muted); font-size: .875rem; }
@@ -52,16 +56,13 @@ h3 { font-size: 1.08rem; }
 .metric-reading small { min-width: 0; font-size: .82rem; color: var(--muted); line-height: 1.15; text-align: right; overflow-wrap: anywhere; }
 .metric.watttime { --accent: var(--carbon); }
 .pv { --accent: var(--pv); }
-.grid { --accent: var(--grid); }
-.ev, .ev_current_a { --accent: var(--ev); }
+.grid, .egauge_grid_w { --accent: var(--grid); }
+.ev, .ev_current_a, .egauge_ev_w { --accent: var(--ev); }
 .inverter_load_w { --accent: #9a472a; }
 .battery_w, .battery_soc { --accent: #7144a3; }
-.cooler_w, .cooler_a { --accent: #33646b; }
-.grid_l1_w, .grid_l1_a, .l1_v { --accent: #5f649b; }
-.grid_l2_w, .grid_l2_a, .l2_v { --accent: #327999; }
-.l3_v { --accent: #8b5d45; }
-.meter_humidity, .grid_hz { --accent: #198078; }
-.meter_temp_f { --accent: #a2552b; }
+.cooler_w { --accent: #33646b; }
+.grid_l1_w { --accent: #5f649b; }
+.grid_l2_w { --accent: #327999; }
 .avoided { --accent: var(--carbon); }
 .chart, .control-panel { padding: 16px; min-width: 0; }
 .panel-heading, .chart-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 7px 14px; }
@@ -75,10 +76,10 @@ h3 { font-size: 1.08rem; }
 .plot svg { display: block; width: 100%; height: 184px; overflow: visible; }
 .plot line { stroke: #dae5e9; vector-effect: non-scaling-stroke; }
 .plot line.zero { stroke: #91a7ae; }
-.carbon-chart { margin-top: 12px; }
+.carbon-chart { margin-top: 26px; }
 .carbon-chart .plot line.zero { stroke: var(--carbon); stroke-dasharray: 1 4; opacity: .65; }
 .plot polyline { fill: none; stroke: var(--accent); stroke-width: 2.3px; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
-.plot polyline.grid { stroke-dasharray: 5 3; }
+.plot polyline.grid, .plot polyline.egauge_grid_w { stroke-dasharray: 5 3; }
 .plot polyline.grid_l1_w { stroke-dasharray: 9 4; }
 .plot polyline.grid_l2_w { stroke-dasharray: 2 3; }
 .plot circle { fill: var(--accent); }
@@ -87,7 +88,7 @@ h3 { font-size: 1.08rem; }
 .chart-footer { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 15px; padding: 0; margin: 0; list-style: none; font-size: .875rem; }
 .legend li::before { content: ""; display: inline-block; width: 16px; border-top: 3px solid var(--accent); margin-inline-end: 6px; vertical-align: middle; }
-.legend li.grid::before, .legend li.grid_l1_w::before { border-top-style: dashed; }
+.legend li.grid::before, .legend li.egauge_grid_w::before, .legend li.grid_l1_w::before { border-top-style: dashed; }
 .legend li.grid_l2_w::before { border-top-style: dotted; }
 .carbon-caption { margin-top: 8px; }
 .empty { min-height: 190px; display: grid; place-content: center; gap: 6px; text-align: center; color: var(--muted); }
@@ -117,7 +118,7 @@ fieldset { min-width: 0; margin: 14px 0 0; border: none; padding: 0; }
 .primary { min-height: 44px; border: 0; border-radius: 7px; font-weight: 650; margin-top: 6px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @media (max-width: 1040px) {
-    .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .metrics { grid-template-columns: repeat(var(--metric-columns, 3), minmax(0, 1fr)); }
 }
 @media (max-width: 760px) {
     .shell { width: calc(100% - 32px); }

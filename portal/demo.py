@@ -24,7 +24,7 @@ def _sample(stamp):
     return {
         "ts": stamp,
         "pv": solar, "grid": grid, "ev": ev, "ev_current_a": ev / 240,
-        "grid_source": "eGauge", "ev_source": "eGauge", "ev_current_a_source": "eGauge",
+        "grid_source": "eGauge", "ev_source": "eGauge", "ev_current_a_source": "OpenEVSE",
         "inverter_load_w": load, "battery_w": battery, "cooler_w": cooler,
         "grid_l1_w": grid * .46, "grid_l2_w": grid * .54,
         "l1_v": 123 + 1.1 * math.sin(hour / 3), "l2_v": 124 + .8 * math.sin(hour / 2),

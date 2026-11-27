@@ -27,7 +27,8 @@ ELECTRICAL_FIELDS = (
 SOURCE_FIELDS = ("grid_source", "ev_source", "ev_current_a_source")
 NUMERIC_FIELDS = ("pv", "grid", "ev", "room", "moer", "ev_current_a", "coolbot_setpoint_f", *ELECTRICAL_FIELDS)
 TEXT_FIELDS = ("ev_state", "policy", *SOURCE_FIELDS)
-DASHBOARD_FIELDS = ("pv", "grid", "ev", "ev_current_a", *ELECTRICAL_FIELDS)
+POWER_CHART_FIELDS = ("pv", "grid", "ev", "grid_l1_w", "grid_l2_w", "cooler_w",
+                      "inverter_load_w", "battery_w", "battery_soc")
 EXTRA_COLUMNS = [*(f"{field} REAL" for field in ELECTRICAL_FIELDS), *(f"{field} TEXT" for field in SOURCE_FIELDS)]
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS samples (
@@ -130,16 +131,29 @@ def record_carbon(samples, path=TELEMETRY_DB, legacy=LEGACY_TELEMETRY, *, now=No
 def _dashboard_rows(db, start, end, buckets):
     db.row_factory = sqlite3.Row
     available = {column["name"] for column in db.execute("PRAGMA table_info(samples)")}
-    fields = [field for field in DASHBOARD_FIELDS if field in available]
+    fields = {field: f"samples.{field}" for field in POWER_CHART_FIELDS if field in available}
+    # Legacy grid readings were from eGauge, and legacy EV readings were from OpenEVSE.
+    meter_fields = {
+        "egauge_grid_w": (
+            "CASE WHEN COALESCE(samples.grid_source, 'eGauge') = 'eGauge' THEN samples.grid END"
+            if "grid_source" in available else "samples.grid"
+        ),
+        "egauge_ev_w": (
+            "CASE WHEN samples.ev_source = 'eGauge' THEN samples.ev END"
+            if "ev_source" in available else "NULL"
+        ),
+    }
+    fields.update(meter_fields)
+    meter_columns = ", ".join(f"{expr} AS {name}" for name, expr in meter_fields.items())
     latest = db.execute(
-        "SELECT * FROM samples WHERE ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT 1",
+        f"SELECT *, {meter_columns} FROM samples WHERE ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT 1",
         (end - RETENTION_DAYS * DAY, end),
     ).fetchone()
     if buckets:
         # The primary key allows an indexed scan over each bucket's time range.
         spans = ", ".join("(?, ?)" for _ in buckets)
         boundaries = [value for bucket in buckets for value in bucket]
-        averages = ", ".join(f"AVG(samples.{field}) AS {field}" for field in fields)
+        averages = ", ".join(f"AVG({expr}) AS {name}" for name, expr in fields.items())
         rows = db.execute(
             f"""
             WITH buckets(start, finish) AS (VALUES {spans})
@@ -154,8 +168,9 @@ def _dashboard_rows(db, start, end, buckets):
             boundaries,
         )
     else:
+        columns = ", ".join(f"{expr} AS {name}" for name, expr in fields.items())
         rows = db.execute(
-            f"SELECT ts, {', '.join(fields)} FROM samples WHERE ts >= ? AND ts <= ? ORDER BY ts",
+            f"SELECT ts, {columns} FROM samples WHERE ts >= ? AND ts <= ? ORDER BY ts",
             (start, end),
         )
     return dict(latest) if latest is not None else {}, [dict(row) for row in rows]

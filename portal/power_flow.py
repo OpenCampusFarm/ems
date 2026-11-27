@@ -26,51 +26,31 @@ class ChartView(NamedTuple):
     step: float
     precision: int
     series: dict
-    include_zero: bool = True
 
 
-VIEWS = {
-    "power": ChartView("Power", "W", 1000, 0, {
+OVERVIEW_VIEW = ChartView("Power flow", "W", 1000, 0, {
+    "pv": "Solar production",
+    "grid": "Grid power",
+    "ev": "EV circuit power",
+})
+SOLARK_VIEWS = {
+    "power": ChartView("Inverter power", "W", 1000, 0, {
         "pv": "Solar production",
-        "grid": "Grid power",
-        "ev": "EV circuit power",
         "inverter_load_w": "Inverter load",
         "battery_w": "Stationary battery power",
-        "cooler_w": "Cooler circuit power",
-        "grid_l1_w": "Grid L1 power",
-        "grid_l2_w": "Grid L2 power",
     }),
-    "voltage": ChartView("Voltage", "V", 25, 1, {
-        "l1_v": "L1 voltage",
-        "l2_v": "L2 voltage",
-        "l3_v": "L3 voltage (unused)",
-    }),
-    "current": ChartView("Current", "A", 2, 1, {
-        "ev_current_a": "EV charge current",
-        "grid_l1_a": "Grid L1 current",
-        "grid_l2_a": "Grid L2 current",
-        "cooler_a": "Cooler current",
-    }),
-    "percent": ChartView("Percent", "%", 100, 1, {
+    "charge": ChartView("Battery charge", "%", 100, 1, {
         "battery_soc": "Stationary battery charge",
-        "meter_humidity": "eGauge humidity",
     }),
-    "temperature": ChartView("Meter temperature", "°F", 5, 1, {
-        "meter_temp_f": "eGauge temperature",
-    }, include_zero=False),
-    "frequency": ChartView("Frequency", "Hz", 0.05, 3, {
-        "grid_hz": "Grid frequency",
-    }, include_zero=False),
 }
+EGAUGE_VIEW = ChartView("Grid and circuit power", "W", 1000, 0, {
+    "egauge_grid_w": "Grid power",
+    "grid_l1_w": "Grid L1 power",
+    "grid_l2_w": "Grid L2 power",
+    "cooler_w": "Cooler circuit power",
+    "egauge_ev_w": "EV circuit power",
+})
 CARBON_VIEW = ChartView("Estimated CO₂ avoided", "kg/h", 0.25, 3, {"avoided": "Estimated CO₂ avoided"})
-DEFAULT_VIEW = "power"
-
-METER_SOURCES = {
-    key: "Sol-Ark" if key in ("pv", "inverter_load_w", "battery_w", "battery_soc") else "eGauge"
-    for view in VIEWS.values() for key in view.series
-}
-# Older EV telemetry was collected directly from the charger.
-METER_SOURCES.update(ev="OpenEVSE", ev_current_a="OpenEVSE")
 
 
 PERIODS = {
@@ -113,12 +93,8 @@ def build_chart(rows, end, period, view):
     start = end - period.duration
     series, step = view.series, view.step
     values = [row[key] for row in rows for key in series if numeric(row.get(key))]
-    if view.include_zero:
-        low = min(0, floor(min(values, default=0) / step) * step)
-        high = max(step, ceil(max(values, default=0) / step) * step)
-    else:
-        low = floor(min(values, default=0) / step) * step
-        high = max(low + step, ceil(max(values, default=0) / step) * step)
+    low = min(0, floor(min(values, default=0) / step) * step)
+    high = max(step, ceil(max(values, default=0) / step) * step)
 
     def y(value):
         return 12 + (high - value) * 152 / (high - low)
