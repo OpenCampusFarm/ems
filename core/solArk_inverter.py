@@ -1,9 +1,10 @@
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from math import isfinite
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
@@ -17,6 +18,9 @@ API_USERNAME = os.getenv("SOLARK_USERNAME")
 API_PASSWORD = os.getenv("SOLARK_PASSWORD")
 PLANT_ID = os.getenv("SOLARK_PLANT_ID", "139155")
 BASE_URL = "https://ecsprod-api-new.solarkcloud.com"
+WORKDATA_URL = "https://api.solarkcloud.com/api/v1/workdata/dynamic"
+DEVICE_SN = os.getenv("SOLARK_DEVICE_SN") or ("2308170261" if PLANT_ID == "139155" else None)
+FARM_TIME = ZoneInfo("America/Detroit")
 
 FLOW_FIELDS = {
     "pv": "pvPower",
@@ -25,6 +29,31 @@ FLOW_FIELDS = {
     "load": "loadOrEpsPower",
     "soc": "soc",
 }
+FLOW_STATUS = {
+    "pvTo": "Solar path active",
+    "toLoad": "Supplying load",
+    "gridTo": "Importing from grid",
+    "toGrid": "Exporting to grid",
+    "toBat": "Charging battery",
+    "batTo": "Discharging battery",
+    "genTo": "Generator path active",
+    "minTo": "Microinverter path active",
+    "existsGen": "Generator configured",
+    "existsMin": "Microinverter configured",
+    "existsMeter": "External meter configured",
+    "genOn": "Generator on",
+    "microOn": "Microinverter on",
+    "bmsCommFaultFlag": "Battery communication fault",
+    "existThinkPower": "ThinkPower detected",
+}
+
+
+def _finite_number(value):
+    try:
+        number = float(value) if not isinstance(value, bool) else float("nan")
+    except (ValueError, TypeError):
+        return None
+    return number if isfinite(number) else None
 
 
 def get_access_token() -> str | None:
@@ -64,12 +93,8 @@ def parse_flow_data(flow_response: dict[str, Any], *, preserve_missing=False) ->
     missing = None if preserve_missing else 0.0
     flow = {}
     for name, field in FLOW_FIELDS.items():
-        value = data.get(field)
-        try:
-            number = float(value) if not isinstance(value, bool) else float("nan")
-        except (ValueError, TypeError):
-            number = float("nan")
-        flow[name] = number if isfinite(number) else missing
+        number = _finite_number(data.get(field))
+        flow[name] = number if number is not None else missing
 
     flow["grid_buying"] = data.get("gridTo") if preserve_missing else bool(data.get("gridTo"))
     if preserve_missing:
@@ -77,6 +102,9 @@ def parse_flow_data(flow_response: dict[str, Any], *, preserve_missing=False) ->
             grid_selling=data.get("toGrid"),
             battery_charging=data.get("toBat"),
             battery_discharging=data.get("batTo"),
+            generator=_finite_number(data.get("genPower")),
+            microinverter=_finite_number(data.get("minPower")),
+            status={label: data[key] for key, label in FLOW_STATUS.items() if isinstance(data.get(key), bool)},
         )
     return flow
 
@@ -121,6 +149,47 @@ def fetch_plant_data(*, preserve_missing=False) -> dict | None:
         return parsed_data
     except Exception as e:
         print(f"[ERROR] Failed to fetch flow data: {e}")
+        return None
+
+
+def parse_workdata_record(record):
+    stamp = datetime.fromisoformat(record["Time"])
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=FARM_TIME)
+    readings = {}
+    for key, value in record.items():
+        # The suffix is the register ID. Leave unitless status codes as text.
+        if "/" not in key or not isinstance(value, (str, int, float, bool, type(None))):
+            continue
+        number = _finite_number(value) if ")/" in key else None
+        readings[key] = number if number is not None else str(value) if value is not None else None
+    return stamp.timestamp(), readings
+
+
+def fetch_workdata():
+    # The plant-flow request already authenticated this cycle.
+    token = cached_token
+    if not DEVICE_SN or not token or time.time() >= token_expiry:
+        return None
+    today = datetime.now(FARM_TIME).date()
+    try:
+        response = requests.get(WORKDATA_URL, headers={
+            "Authorization": f"Bearer {token}",
+            "Origin": "https://www.solarkcloud.com",
+            "Referer": "https://www.solarkcloud.com/",
+        }, params={
+            "page": 1, "limit": 1, "sn": DEVICE_SN,
+            "dateRange": f"{today - timedelta(days=1)},{today}",
+            "type": 1, "lan": "en", "sgip": "false",
+        }, timeout=8)
+        response.raise_for_status()
+        body = response.json()
+        if body.get("code") != 0:
+            return None
+        records = (body.get("data") or {}).get("record") or []
+        return parse_workdata_record(records[0]) if records else None
+    except (requests.RequestException, ValueError, TypeError, KeyError):
+        print("[Sol-Ark] Inverter diagnostics unavailable this cycle")
         return None
 
 

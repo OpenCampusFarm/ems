@@ -22,7 +22,7 @@
 {% macro chart_panel(chart, view, viewport_id, note=None) %}
 <div class="panel chart">
     <div class="panel-heading">
-        <h3>{{ view.label }}</h3><span class="muted">{{ view.unit }} · {{ period.summary }} · ET</span>
+        <h3>{{ view.label }}</h3><span class="muted">{% if view.unit %}{{ view.unit }} · {% endif %}{{ period.summary }} · ET</span>
     </div>
     {% if caller is defined %}{{ caller() }}{% endif %}
     {% if chart.available %}
@@ -38,7 +38,7 @@
     {% endif %}
 </div>
 {% endmacro %}
-<div id="monitoring" hx-get="{{ url_for('monitoring', range=selected, view=selected_view) }}"
+<div id="monitoring" hx-get="{{ url_for('monitoring', range=selected, view=selected_view, metric=selected_metric) }}"
      hx-trigger="every 15s, refresh-monitoring" hx-swap="outerHTML" hx-sync="this:drop">
     <div class="status">
         <div><strong>EMS service</strong><span class="badge {{ 'running' if ems_service == 'Running' }}">{{ ems_service }}</span></div>
@@ -88,9 +88,9 @@
         {% call chart_panel(overview, overview_view, 'power-chart-viewport', 'Negative grid power = export.') %}
             <nav class="periods" aria-label="Chart time range">
                 {% for key, option in periods.items() %}
-                <a id="power-period-{{ key }}" href="{{ url_for('index', range=key, view=selected_view) }}"
-                   hx-get="{{ url_for('monitoring', range=key, view=selected_view) }}" hx-target="#monitoring"
-                   hx-swap="outerHTML" hx-sync="#monitoring:replace" hx-replace-url="{{ url_for('index', range=key, view=selected_view) }}"
+                <a id="power-period-{{ key }}" href="{{ url_for('index', range=key, view=selected_view, metric=selected_metric) }}"
+                   hx-get="{{ url_for('monitoring', range=key, view=selected_view, metric=selected_metric) }}" hx-target="#monitoring"
+                   hx-swap="outerHTML" hx-sync="#monitoring:replace" hx-replace-url="{{ url_for('index', range=key, view=selected_view, metric=selected_metric) }}"
                    {% if key == selected %}aria-current="true"{% endif %}>{{ option.label }}</a>
                 {% endfor %}
             </nav>
@@ -99,21 +99,59 @@
     <section class="monitoring-group" aria-labelledby="solark-heading">
         <h2 id="solark-heading">Sol-Ark</h2>
         <div class="metrics solark-metrics">
-            {{ meter_card('inverter_load_w', 'Inverter load', latest.get('inverter_load_w'), 'kW') }}
-            {{ meter_card('battery_w', 'Stationary battery power', latest.get('battery_w'), 'kW') }}
+            {% for key, label in solark_power_series.items() %}
+            {% set configured = {'solark_generator_w': 'Generator configured', 'solark_micro_w': 'Microinverter configured'}.get(key) %}
+            {{ meter_card(key, label, latest.get(key), 'kW',
+                          'Not configured' if configured and solark_status.get(configured) is false else none) }}
+            {% endfor %}
             {{ meter_card('battery_soc', 'Stationary battery charge', latest.get('battery_soc'), '%') }}
         </div>
         {% call chart_panel(solark, solark_view, 'solark-chart-viewport',
-                           'Negative battery power = charging.' if selected_view == 'power' else none) %}
+                           'Negative grid power = export. Negative battery power = charging.' if selected_view == 'power' else none) %}
             <nav class="periods" aria-label="Sol-Ark chart reading">
-                {% for key, label in [('power', 'Power'), ('charge', 'Battery charge')] %}
-                <a href="{{ url_for('index', range=selected, view=key) }}"
-                   hx-get="{{ url_for('monitoring', range=selected, view=key) }}" hx-target="#monitoring"
-                   hx-swap="outerHTML" hx-sync="#monitoring:replace" hx-replace-url="{{ url_for('index', range=selected, view=key) }}"
+                {% for key, label in [('power', 'Power'), ('charge', 'Battery charge'), ('diagnostics', 'Diagnostics')] %}
+                <a href="{{ url_for('index', range=selected, view=key, metric=selected_metric) }}"
+                   hx-get="{{ url_for('monitoring', range=selected, view=key, metric=selected_metric) }}" hx-target="#monitoring"
+                   hx-swap="outerHTML" hx-sync="#monitoring:replace" hx-replace-url="{{ url_for('index', range=selected, view=key, metric=selected_metric) }}"
                    {% if key == selected_view %}aria-current="true"{% endif %}>{{ label }}</a>
                 {% endfor %}
             </nav>
+            {% if selected_view == 'diagnostics' and measurable %}
+            <form class="diagnostic-picker" method="get" action="{{ url_for('index') }}"
+                  hx-get="{{ url_for('monitoring') }}" hx-target="#monitoring" hx-swap="outerHTML" hx-sync="#monitoring:replace">
+                <input type="hidden" name="range" value="{{ selected }}">
+                <input type="hidden" name="view" value="diagnostics">
+                <input type="hidden" name="metric_form" value="1">
+                <label for="diagnostic-metric">Inverter reading</label>
+                <select id="diagnostic-metric" name="metric">
+                    {% for key in measurable %}
+                    {% set label, unit, register = fields[key] %}
+                    <option value="{{ key }}"{% if key == selected_metric %} selected{% endif %}>{{ label }} ({{ unit }}) · {{ register }}</option>
+                    {% endfor %}
+                </select>
+                <button class="primary" type="submit">Plot</button>
+            </form>
+            {% endif %}
         {% endcall %}
+        <details id="solark-diagnostics" class="panel diagnostics-list">
+            <summary>All inverter readings{% if diagnostics_time %} <span class="muted">· {{ diagnostics_time }} ET</span>{% endif %}</summary>
+            {% if diagnostics or solark_status %}
+            <table>
+                <thead><tr><th scope="col">Reading</th><th scope="col">Value</th><th scope="col">Unit</th></tr></thead>
+                <tbody>
+                    {% for key, value in diagnostics.items() %}
+                    {% set label, unit, register = fields[key] %}
+                    <tr><th scope="row">{{ label }} <small class="muted">· {{ register }}</small></th><td>{{ value if value is not none else '—' }}</td><td>{{ unit }}</td></tr>
+                    {% endfor %}
+                    {% for label, active in solark_status.items() %}
+                    <tr><th scope="row">{{ label }}</th><td>{{ 'Yes' if active else 'No' }}</td><td></td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <p class="muted">Waiting for Sol-Ark diagnostics.</p>
+            {% endif %}
+        </details>
     </section>
     <section class="monitoring-group" aria-labelledby="egauge-heading">
         <h2 id="egauge-heading">eGauge</h2>

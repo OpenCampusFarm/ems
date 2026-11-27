@@ -126,4 +126,16 @@ function setupCharts() {
 }
 
 setupCharts();
-document.body.addEventListener("htmx:afterSwap", setupCharts);
+let inverterDetailsOpen = false;
+document.body.addEventListener("htmx:beforeSwap", ({ detail }) => {
+    if (detail.target.id === "monitoring") {
+        inverterDetailsOpen = document.getElementById("solark-diagnostics")?.open ?? false;
+    }
+});
+document.body.addEventListener("htmx:afterSwap", ({ detail }) => {
+    if (detail.target.id === "monitoring") {
+        const details = document.getElementById("solark-diagnostics");
+        if (details) details.open = inverterDetailsOpen;
+    }
+    setupCharts();
+});

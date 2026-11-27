@@ -7,7 +7,7 @@ from itertools import chain
 
 from coolbot_monitor import CoolBotReading
 from power_flow import FARM_TIME
-from telemetry_store import DAY, record_carbon, record_samples
+from telemetry_store import DAY, record_carbon, record_samples, record_solark_workdata
 
 
 def _sample(stamp):
@@ -25,6 +25,8 @@ def _sample(stamp):
         "ts": stamp,
         "pv": solar, "grid": grid, "ev": ev, "ev_current_a": ev / 240,
         "grid_source": "eGauge", "ev_source": "eGauge", "ev_current_a_source": "OpenEVSE",
+        "solark_grid_w": grid * .98, "solark_generator_w": 0, "solark_micro_w": 0,
+        "solark_status": '{"Generator configured":false,"Microinverter configured":false}',
         "inverter_load_w": load, "battery_w": battery, "cooler_w": cooler,
         "grid_l1_w": grid * .46, "grid_l2_w": grid * .54,
         "l1_v": 123 + 1.1 * math.sin(hour / 3), "l2_v": 124 + .8 * math.sin(hour / 2),
@@ -53,3 +55,12 @@ def write_samples(path):
          for offset in chain(older, recent)),
         path, legacy=None, now=now,
     )
+    for offset in range(DAY, -1, -300):
+        stamp = now - offset
+        record_solark_workdata(stamp, {
+            "BatteryVolt(V)/183": 52.1 + .4 * math.sin(offset / 11000),
+            "BatteryTemp(℃)/182": 9 + math.sin(offset / 7900),
+            "GridBuyToday(kWh)/76": 4.4 * (DAY - offset) / DAY,
+            "Fac(Hz)/79": 60 + .02 * math.sin(offset / 400),
+            "RunStatus/59": "2",
+        }, path, legacy=None, now=now)

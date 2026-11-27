@@ -25,11 +25,14 @@ ELECTRICAL_FIELDS = (
     "meter_temp_f", "grid_hz",
 )
 SOURCE_FIELDS = ("grid_source", "ev_source", "ev_current_a_source")
-NUMERIC_FIELDS = ("pv", "grid", "ev", "room", "moer", "ev_current_a", "coolbot_setpoint_f", *ELECTRICAL_FIELDS)
-TEXT_FIELDS = ("ev_state", "policy", *SOURCE_FIELDS)
+SOLARK_POWER_FIELDS = ("solark_grid_w", "solark_generator_w", "solark_micro_w")
+NUMERIC_FIELDS = ("pv", "grid", "ev", "room", "moer", "ev_current_a", "coolbot_setpoint_f",
+                  *ELECTRICAL_FIELDS, *SOLARK_POWER_FIELDS)
+TEXT_FIELDS = ("ev_state", "policy", *SOURCE_FIELDS, "solark_status")
 POWER_CHART_FIELDS = ("pv", "grid", "ev", "grid_l1_w", "grid_l2_w", "cooler_w",
-                      "inverter_load_w", "battery_w", "battery_soc")
+                      "inverter_load_w", "battery_w", "battery_soc", *SOLARK_POWER_FIELDS)
 EXTRA_COLUMNS = [*(f"{field} REAL" for field in ELECTRICAL_FIELDS), *(f"{field} TEXT" for field in SOURCE_FIELDS)]
+SOLARK_COLUMNS = [*(f"{field} REAL" for field in SOLARK_POWER_FIELDS), "solark_status TEXT"]
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS samples (
     ts REAL PRIMARY KEY,
@@ -42,7 +45,13 @@ CREATE TABLE IF NOT EXISTS samples (
     policy TEXT,
     ev_current_a REAL,
     coolbot_setpoint_f REAL,
-    {", ".join(EXTRA_COLUMNS)}
+    {", ".join(EXTRA_COLUMNS + SOLARK_COLUMNS)}
+) WITHOUT ROWID
+"""
+WORKDATA_SCHEMA = """
+CREATE TABLE IF NOT EXISTS solark_workdata (
+    ts REAL PRIMARY KEY,
+    readings TEXT NOT NULL
 ) WITHOUT ROWID
 """
 CARBON_SCHEMA = """
@@ -103,8 +112,12 @@ def _begin_write(db, legacy, cutoff):
     if 1 <= version < 5:
         for column in EXTRA_COLUMNS:
             db.execute(f"ALTER TABLE samples ADD COLUMN {column}")
-    if version < 5:
-        db.execute("PRAGMA user_version=5")
+    if 1 <= version < 6:
+        for column in SOLARK_COLUMNS:
+            db.execute(f"ALTER TABLE samples ADD COLUMN {column}")
+    if version < 6:
+        db.execute(WORKDATA_SCHEMA)
+        db.execute("PRAGMA user_version=6")
 
 
 def record_samples(samples, path=TELEMETRY_DB, legacy=LEGACY_TELEMETRY, *, now=None):
@@ -126,6 +139,57 @@ def record_carbon(samples, path=TELEMETRY_DB, legacy=LEGACY_TELEMETRY, *, now=No
             (row for row in samples if row[0] >= cutoff and all(numeric(value) for value in row)),
         )
         db.execute("DELETE FROM carbon_samples WHERE ts < ?", (cutoff,))
+
+
+def record_solark_workdata(stamp, readings, path=TELEMETRY_DB, legacy=LEGACY_TELEMETRY, *, now=None):
+    cutoff = (time.time() if now is None else now) - RETENTION_DAYS * DAY
+    if not numeric(stamp) or stamp < cutoff or not readings:
+        return
+    with closing(sqlite3.connect(path, timeout=2)) as db, db:
+        _begin_write(db, legacy, cutoff)
+        db.execute("INSERT OR REPLACE INTO solark_workdata VALUES (?, ?)",
+                   (stamp, json.dumps(readings, separators=(",", ":"), allow_nan=False)))
+        db.execute("DELETE FROM solark_workdata WHERE ts < ?", (cutoff,))
+
+
+def read_solark_workdata(path, end):
+    if not path.exists():
+        return None, {}
+    uri = path.resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
+        if db.execute("PRAGMA user_version").fetchone()[0] < 6:
+            return None, {}
+        row = db.execute(
+            "SELECT ts, readings FROM solark_workdata WHERE ts <= ? ORDER BY ts DESC LIMIT 1", (end,)
+        ).fetchone()
+    return (row[0], json.loads(row[1])) if row else (None, {})
+
+
+def read_solark_history(path, metric, start, end, buckets):
+    # Read one register from each record. Unitless strings and invalid values leave gaps.
+    field = "$." + json.dumps(metric, ensure_ascii=False)
+    value = "CASE WHEN json_type(readings, ?) IN ('integer', 'real') THEN json_extract(readings, ?) END"
+    uri = path.resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
+        db.row_factory = sqlite3.Row
+        if buckets:
+            spans = ", ".join("(?, ?)" for _ in buckets)
+            boundaries = [value for bucket in buckets for value in bucket]
+            rows = db.execute(
+                f"""WITH buckets(start, finish) AS (VALUES {spans})
+                    SELECT (start + finish) / 2.0 AS ts, start AS bucket_start, finish AS bucket_end,
+                           AVG({value}) AS reading
+                    FROM buckets
+                    LEFT JOIN solark_workdata ON solark_workdata.ts >= start AND solark_workdata.ts < finish
+                    GROUP BY start, finish ORDER BY start""",
+                (*boundaries, field, field),
+            )
+        else:
+            rows = db.execute(
+                f"""SELECT ts, {value} AS reading FROM solark_workdata
+                    WHERE ts >= ? AND ts <= ? ORDER BY ts""", (field, field, start, end),
+            )
+        return [dict(row) for row in rows]
 
 
 def _dashboard_rows(db, start, end, buckets):

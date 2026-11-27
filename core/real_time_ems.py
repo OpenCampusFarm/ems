@@ -29,14 +29,14 @@ from dotenv import load_dotenv
 
 from dashboard_telemetry import publish
 from system_state import read_state
-from telemetry_store import numeric
+from telemetry_store import numeric, record_solark_workdata
 
 from Loads.coolbot import change_setpoint, get_coolbot_temp, get_room_temp
 from Loads.openevse import get_status as get_ev_status
 from Loads.openevse import release_claim, set_charging
 from egauge_client import EGaugeClient
 from ev_current_policy import choose_ev_amps, excess_pv_watts
-from solArk_inverter import fetch_plant_data
+from solArk_inverter import fetch_plant_data, fetch_workdata
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -314,6 +314,8 @@ def main() -> None:
         while not _stop.is_set():
             try:
                 run_ems_cycle(policy)
+                if not _stop.is_set() and (workdata := fetch_workdata()) is not None:
+                    record_solark_workdata(*workdata)
             except KeyboardInterrupt:
                 break
             except Exception as exc:

@@ -1,5 +1,6 @@
 import fcntl
 import hmac
+import json
 import logging
 import os
 import secrets
@@ -21,17 +22,26 @@ from process_control import apply_mode, service_status
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from power_flow import (
-    CARBON_VIEW, DEFAULT_PERIOD, EGAUGE_VIEW, FARM_TIME, GAP, OVERVIEW_VIEW, PERIODS, SOLARK_VIEWS,
+    CARBON_VIEW, DEFAULT_PERIOD, EGAUGE_VIEW, FARM_TIME, GAP, OVERVIEW_VIEW, PERIODS, SOLARK_VIEWS, ChartView,
     build_chart, chart_buckets,
 )
 from system_state import (
     COOLBOT_MAX_F, COOLBOT_MIN_F, DATABASE, MODES, mark_applied, read_state,
     save_coolbot_targets, save_mode,
 )
-from telemetry_store import LEGACY_TELEMETRY, TELEMETRY_DB, numeric, read_carbon, read_dashboard
+from telemetry_store import (
+    LEGACY_TELEMETRY, TELEMETRY_DB, numeric, read_carbon, read_dashboard, read_solark_history,
+    read_solark_workdata,
+)
 
 log = logging.getLogger(__name__)
 CONTROL_LABELS = {"fan": "Fan mode", "ems": "EMS mode", "charging_policy": "Charging policy"}
+
+
+def diagnostic_field(key):
+    name, _, register = key.rpartition("/")
+    label, _, unit = name[:-1].rpartition("(") if name.endswith(")") else (name, "", "")
+    return label, unit, register
 
 
 def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
@@ -219,9 +229,9 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             key = DEFAULT_PERIOD
         period = PERIODS[key]
         selected_view = request.args.get("view", "power")
-        if selected_view not in SOLARK_VIEWS:
+        if selected_view not in (*SOLARK_VIEWS, "diagnostics"):
             selected_view = "power"
-        solark_view = SOLARK_VIEWS[selected_view]
+        solark_view = SOLARK_VIEWS.get(selected_view, SOLARK_VIEWS["power"])
         now = time.time()
         start = now - period.duration
         buckets = chart_buckets(start, now, period.bucket)
@@ -239,19 +249,47 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
         except (OSError, sqlite3.Error):
             log.exception("[Portal] Could not read carbon estimates")
             carbon_rows = []
+        diagnostics_time = None
+        diagnostics = {}
+        try:
+            diagnostics_time, diagnostics = read_solark_workdata(telemetry, now)
+        except (OSError, sqlite3.Error, ValueError):
+            log.exception("[Portal] Could not read Sol-Ark diagnostics")
+        fields = {key: diagnostic_field(key) for key in diagnostics}
+        measurable = [key for key, value in diagnostics.items() if numeric(value)]
+        chosen = request.args.get("metric", "BatteryVolt(V)/183")
+        if chosen not in measurable:
+            chosen = next(iter(measurable), None)
+        solark_rows = rows
+        if selected_view == "diagnostics":
+            solark_rows = []
+            if chosen:
+                label, unit, _ = fields[chosen]
+                solark_view = ChartView(label, unit, 0.01, 3, {"reading": label}, include_zero=False)
+                try:
+                    solark_rows = read_solark_history(telemetry, chosen, start, now, buckets)
+                except (OSError, sqlite3.Error, ValueError):
+                    log.exception("[Portal] Could not read historical Sol-Ark diagnostics")
+            else:
+                solark_view = ChartView("Inverter diagnostics", "", 1, 0, {})
+        status = json.loads(latest.get("solark_status") or "{}")
         coolbot = read_coolbot() if read_coolbot else None
         coolbot_last_read = (
             datetime.fromtimestamp(coolbot.ts, FARM_TIME).strftime("%b %d, %H:%M")
             if coolbot and now - coolbot.ts > STALE_SECONDS
             else None
         )
-        return render_template(
+        html = render_template(
             "monitoring.html", latest=latest,
             overview=build_chart(rows, now, period, OVERVIEW_VIEW), overview_view=OVERVIEW_VIEW,
-            solark=build_chart(rows, now, period, solark_view), solark_view=solark_view,
+            solark=build_chart(solark_rows, now, period, solark_view), solark_view=solark_view,
             egauge=build_chart(rows, now, period, EGAUGE_VIEW), egauge_view=EGAUGE_VIEW,
             carbon=build_chart(carbon_rows, now, period, CARBON_VIEW), carbon_view=CARBON_VIEW,
-            selected_view=selected_view,
+            selected_view=selected_view, selected_metric=chosen, diagnostics=diagnostics,
+            solark_power_series=SOLARK_VIEWS["power"].series,
+            fields=fields, measurable=measurable, solark_status=status,
+            diagnostics_time=(datetime.fromtimestamp(diagnostics_time, FARM_TIME).strftime("%b %d, %H:%M")
+                              if diagnostics_time is not None else None),
             periods=PERIODS, selected=key, period=period, unavailable=unavailable,
             last_sample=datetime.fromtimestamp(latest["ts"], FARM_TIME).strftime("%b %d, %H:%M")
             if latest else None,
@@ -261,6 +299,10 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             fan_service="Preview" if demo else service_status("fan"),
             numeric=numeric,
         )
+        if (request.endpoint == "monitoring" and request.args.get("metric_form")
+                and request.headers.get("HX-Request") == "true"):
+            return html, {"HX-Replace-Url": url_for("index", range=key, view=selected_view, metric=chosen)}
+        return html
     log.info("[Portal] Initialized in %s mode", "demo" if demo else "production")
     return app
 

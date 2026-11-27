@@ -1,5 +1,6 @@
 """Publish measured values for the local operator dashboard."""
 
+import json
 import logging
 import sqlite3
 import time
@@ -64,6 +65,10 @@ def build_sample(power, egauge, ev, room_temp, moer, policy, *, coolbot_setpoint
         "pv": power.get("pv"),
         "grid": _reading(grid, solark_grid),
         "grid_source": "eGauge" if grid is not None else "Sol-Ark" if solark_grid is not None else None,
+        "solark_grid_w": solark_grid,
+        "solark_generator_w": power.get("generator"),
+        "solark_micro_w": power.get("microinverter"),
+        "solark_status": json.dumps(power["status"]) if power.get("status") else None,
         "ev": _reading(ev_w, ev.get("power_w")),
         "ev_source": "eGauge" if ev_w is not None else "OpenEVSE" if numeric(ev.get("power_w")) else None,
         "ev_current_a": ev_a,

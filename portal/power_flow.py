@@ -26,6 +26,7 @@ class ChartView(NamedTuple):
     step: float
     precision: int
     series: dict
+    include_zero: bool = True
 
 
 OVERVIEW_VIEW = ChartView("Power flow", "W", 1000, 0, {
@@ -36,8 +37,11 @@ OVERVIEW_VIEW = ChartView("Power flow", "W", 1000, 0, {
 SOLARK_VIEWS = {
     "power": ChartView("Inverter power", "W", 1000, 0, {
         "pv": "Solar production",
+        "solark_grid_w": "Grid power",
         "inverter_load_w": "Inverter load",
         "battery_w": "Stationary battery power",
+        "solark_generator_w": "Generator power",
+        "solark_micro_w": "Microinverter power",
     }),
     "charge": ChartView("Battery charge", "%", 100, 1, {
         "battery_soc": "Stationary battery charge",
@@ -95,6 +99,9 @@ def build_chart(rows, end, period, view):
     values = [row[key] for row in rows for key in series if numeric(row.get(key))]
     low = min(0, floor(min(values, default=0) / step) * step)
     high = max(step, ceil(max(values, default=0) / step) * step)
+    if values and not view.include_zero:
+        low = floor(min(values) / step) * step
+        high = max(low + step, ceil(max(values) / step) * step)
 
     def y(value):
         return 12 + (high - value) * 152 / (high - low)
