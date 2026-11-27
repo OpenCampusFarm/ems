@@ -16,6 +16,7 @@ from xmlrpc.client import Error as RPCError
 from dotenv import load_dotenv
 from flask import Flask, abort, redirect, render_template, request, session, url_for
 
+from coolbot_monitor import STALE_SECONDS, CoolBotMonitor
 from process_control import apply_mode, service_status
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -32,7 +33,8 @@ log = logging.getLogger(__name__)
 CONTROL_LABELS = {"fan": "Fan mode", "ems": "EMS mode", "charging_policy": "Charging policy"}
 
 
-def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *, legacy=LEGACY_TELEMETRY):
+def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
+               legacy=LEGACY_TELEMETRY, read_coolbot=None):
     load_dotenv(Path(__file__).with_name(".env"))
 
     app = Flask(__name__)
@@ -41,6 +43,10 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *, legacy=
     secret_key = os.environ.get("PORTAL_SECRET_KEY", "")
     valid_secret = len(secret_key) >= 32 and not secret_key.startswith("replace-with-")
     if demo:
+        if read_coolbot is None:
+            from demo import sample_coolbot
+
+            read_coolbot = sample_coolbot
         if not password or password.startswith("replace-with-"):
             username, password = "operator", "farm-preview"
         # A configured preview stays signed in across restarts with its own signing key.
@@ -228,6 +234,12 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *, legacy=
         except (OSError, sqlite3.Error):
             log.exception("[Portal] Could not read carbon estimates")
             carbon_rows = []
+        coolbot = read_coolbot() if read_coolbot else None
+        coolbot_last_read = (
+            datetime.fromtimestamp(coolbot.ts, FARM_TIME).strftime("%b %d, %H:%M")
+            if coolbot and now - coolbot.ts > STALE_SECONDS
+            else None
+        )
         return render_template(
             "monitoring.html", latest=latest, chart=build_chart(rows, now, period, unit_scale=1), series=SERIES,
             carbon=build_chart(carbon_rows, now, period, series=CARBON_SERIES, step=0.25, unit_scale=1),
@@ -235,6 +247,7 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *, legacy=
             last_sample=datetime.fromtimestamp(latest["ts"], FARM_TIME).strftime("%b %d, %H:%M")
             if latest else None,
             stale=bool(latest and now - latest["ts"] > GAP),
+            coolbot=coolbot, coolbot_last_read=coolbot_last_read,
             ems_service="Preview" if demo else service_status("ems"),
             fan_service="Preview" if demo else service_status("fan"),
             numeric=numeric,
@@ -263,6 +276,9 @@ if __name__ == "__main__":
             serve(create_app(data / "system.db", telemetry, demo=True), host="127.0.0.1", port=8080,
                   channel_timeout=150)
     elif not sys.argv[1:]:
-        serve(create_app(), host="127.0.0.1", port=8080, channel_timeout=150)
+        monitor = CoolBotMonitor()
+        app = create_app(read_coolbot=monitor.read)
+        monitor.start()
+        serve(app, host="127.0.0.1", port=8080, channel_timeout=150)
     else:
         sys.exit("Usage: python app.py [--demo]")

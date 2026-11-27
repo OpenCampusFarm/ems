@@ -38,20 +38,23 @@
             </div>
         </div>
         {% endfor %}
-        <div class="panel metric room">
-            <span>Cool room temperature</span>
+        {% for key, label, field, pattern in (
+            ('room', 'Cool room temperature', 'room_f', '%.1f'),
+            ('setpoint', 'CoolBot setpoint', 'setpoint_f', '%g')
+        ) %}
+        <div class="panel metric {{ key }}">
+            <span>{{ label }}</span>
+            {% if coolbot_last_read %}
+            <span class="metric-detail">Last read {{ coolbot_last_read }} ET</span>
+            {% elif not coolbot %}
+            <span class="metric-detail">Waiting for CoolBot</span>
+            {% endif %}
             <div class="metric-reading">
-                <strong>{{ '%.1f' | format(latest.room) if numeric(latest.get('room')) else '—' }}</strong>
+                <strong>{{ pattern | format(coolbot[field]) if coolbot and numeric(coolbot[field]) else '—' }}</strong>
                 <small>°F</small>
             </div>
         </div>
-        <div class="panel metric setpoint">
-            <span>CoolBot setpoint</span>
-            <div class="metric-reading">
-                <strong>{{ '%g' | format(latest.coolbot_setpoint_f) if numeric(latest.get('coolbot_setpoint_f')) else '—' }}</strong>
-                <small>°F</small>
-            </div>
-        </div>
+        {% endfor %}
     </div>
     <section class="panel chart">
         <div class="panel-heading"><h2>Power flow</h2><span class="muted">W · {{ period.summary }} · ET</span></div>

@@ -5,6 +5,7 @@ import time
 from datetime import datetime
 from itertools import chain
 
+from coolbot_monitor import CoolBotReading
 from power_flow import FARM_TIME
 from telemetry_store import DAY, record_carbon, record_samples
 
@@ -19,9 +20,15 @@ def _sample(stamp):
     return {
         "ts": stamp,
         "pv": solar, "grid": 600 + ev - solar, "ev": ev, "ev_current_a": ev / 240,
-        "room": 44 + 1.4 * math.sin(hour / 4), "coolbot_setpoint_f": 45, "moer": 1040,
+        "moer": 1040,
         "policy": "staged", "ev_state": "charging" if ev else "idle",
     }
+
+
+def sample_coolbot():
+    now = time.time()
+    hour = datetime.fromtimestamp(now, FARM_TIME).hour
+    return CoolBotReading(44 + 1.4 * math.sin(hour / 4), 45, now)
 
 
 def write_samples(path):
