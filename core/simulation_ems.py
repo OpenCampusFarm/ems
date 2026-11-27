@@ -59,6 +59,7 @@ TMAX             = 55.0   # °F — safety maximum (spoilage prevention)
 COOLER_ELECTRIC_KW       = 0.207    # kW at 60 °F outdoors (tuned)
 COOLER_ELECTRIC_KW_PER_F = 0.0165   # kW more per °F warmer outside (tuned)
 COOLER_ELECTRIC_REF_F    = 60.0     # °F, reference outdoor temp for the line above
+COOLER_COP         = 2.0    # cooling output per unit of electricity
 OTHER_LOAD_KW      = 0.25   # kW, wifi/electronics room and controllers on the load port, always on (lights off)
 
 # Fan model: two 31 W intake fans; 65% effective airflow is an assumption.
@@ -148,7 +149,7 @@ class SimCooler:
         outdoor_f: float  = OUTDOOR_TEMP,
         setpoint_f: float = SETPOINT_ECON,
         power_kw: float   = 3.67,   # AC cooling power for the temperature model
-        cop: float        = 2.0,    # cooling out per unit of electricity
+        cop: float        = COOLER_COP,
         cold_capacity_factor: float = 0.75,
         cold_outdoor_f: float = 60.0,
         warm_outdoor_f: float = 70.0,

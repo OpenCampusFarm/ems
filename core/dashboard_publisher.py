@@ -5,11 +5,9 @@ Every POWER_PUBLISH_INTERVAL seconds it reads PV / grid / load power from the
 SolArk inverter API and POSTs it to the site's cf_data module
 (`/api/cf/power`), for the cf_power_flow diagram.
 
-By default it runs the carbon calculator (carbon_live.py) using
-live MOER (WattTime), truck connection (OpenEVSE), and outdoor temperature
-(Open-Meteo). It stores estimates locally for the Portal and, when Drupal is
-configured, POSTs the three carbon lines to `/api/cf/carbon` every
-CARBON_PUBLISH_MINUTES.
+By default it stores separate fan and EV charging estimates for the Portal.
+When Drupal is configured, it also runs the whole-farm model and POSTs its
+three carbon lines to `/api/cf/carbon` every CARBON_PUBLISH_MINUTES.
 
 The carbon shadow farm (simulated truck and battery) keeps its state in
 carbon_live_state.json, so it carries on across restarts. When that file
@@ -33,14 +31,17 @@ import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-from carbon_live import STATE_FILE, CarbonTracker
+from carbon_live import STATE_FILE, CarbonTracker, co2_lb, estimate_fan_avoided_lb
 from Loads.openevse import get_status as get_ev_status
+from ev_current_policy import excess_pv_watts
+from simulation_ems import INVERTER_PV_LOSS
 from watttime_client import get_grid_moer
 from solArk_inverter import fetch_plant_data
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from dashboard_telemetry import build_sample
 from fan_runtime import read_auto_fan_reading
-from telemetry_store import numeric, record_carbon
+from telemetry_store import numeric, record_equipment_carbon
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -142,8 +143,28 @@ def get_outdoor_f() -> float | None:
         return None
 
 
+def estimate_ev_avoided_lb(sample, ev_status, moer, minutes):
+    """Compare the solar-powered share of measured charging with the same energy from the grid."""
+    if not ev_status or ev_status.get("state") is None:
+        return None
+    if not ev_status["charging"]:
+        return 0.0
+    ev_w = sample["ev"]
+    if not numeric(ev_w) or ev_w <= 0:
+        return None
+    pv_w, load_w, battery_w, grid_w = (sample[key] for key in ("pv", "inverter_load_w", "battery_w", "grid"))
+    if not all(numeric(value) for value in (pv_w, load_w, battery_w, grid_w)):
+        return None
+    # Battery is positive while discharging and grid is positive while importing.
+    solar_after_loads = excess_pv_watts(pv_w * (1 - INVERTER_PV_LOSS), load_w, ev_w)
+    solar_after_loads -= max(0.0, -battery_w)
+    unserved_by_grid_or_battery = ev_w - max(0.0, grid_w) - max(0.0, battery_w)
+    solar_to_ev_w = max(0.0, min(solar_after_loads, unserved_by_grid_or_battery))
+    return co2_lb(solar_to_ev_w / 1000, moer, minutes)
+
+
 class CarbonPublisher:
-    """Feeds each reading to carbon_live's CarbonTracker and POSTs the totals every few minutes."""
+    """Save equipment-level estimates and publish the Drupal feed when configured."""
 
     def __init__(self, publish_drupal: bool) -> None:
         self.publish_drupal = publish_drupal
@@ -160,22 +181,13 @@ class CarbonPublisher:
                         "baseline_co2_lb": 0.0, "without_ems_co2_lb": 0.0,
                         "with_ems_co2_lb": 0.0, "gas_truck_co2_lb": 0.0}
 
-    def _refresh_inputs(self) -> None:
-        """MOER, outdoor temperature and truck status, each fetched only as often as it changes."""
+    def _refresh_moer(self) -> None:
         now = time.time()
         if now - self.moer_time >= MOER_REFRESH_SECONDS:
             moer = get_grid_moer()
             if moer is not None:
                 self.moer_lb_per_mwh, self.moer_time = moer, now
-        if now - self.outdoor_time >= OUTDOOR_REFRESH_SECONDS:
-            outdoor_f = get_outdoor_f()
-            if outdoor_f is not None:
-                self.outdoor_f, self.outdoor_time = outdoor_f, now
-        ev_status = get_ev_status()
-        if ev_status is not None:
-            self.ev_plugged = ev_status["connected"]
-
-    def _fan_avoided_lb(self, now: float, net_grid_kw: float, minutes: int) -> float | None:
+    def _fan_avoided_lb(self, now: float, net_grid_w: float | None, minutes: int) -> float | None:
         reading = read_auto_fan_reading()
         if reading is None:
             return None
@@ -185,20 +197,42 @@ class CarbonPublisher:
         if not reading["on"]:
             return 0.0
         room_f, outdoor_f = reading.get("room_f"), reading.get("outdoor_f")
-        if not numeric(room_f) or not numeric(outdoor_f):
+        if not all(numeric(value) for value in (room_f, outdoor_f, net_grid_w)):
             return None
-        return self.tracker.estimate_fan_avoided_lb(
+        return estimate_fan_avoided_lb(
             room_f, outdoor_f, CARBON_FAN_POWER_W / 1000.0,
-            net_grid_kw, self.moer_lb_per_mwh, minutes,
+            net_grid_w / 1000.0, self.moer_lb_per_mwh, minutes,
         )
 
     def cycle(self, flow: dict, minutes: int) -> None:
-        """Add one reading covering `minutes`, and POST when CARBON_PUBLISH_MINUTES have built up."""
-        self._refresh_inputs()
+        self._refresh_moer()
         now = time.time()
         if self.moer_lb_per_mwh is None or now - self.moer_time > MOER_MAX_AGE_SECONDS:
             log.warning("[Carbon] No recent MOER — skipping this reading")
             return
+        ev_status = get_ev_status()
+        sample = build_sample(flow, None, ev_status, None, self.moer_lb_per_mwh, None)
+        try:
+            record_equipment_carbon((
+                (sample["ts"], minutes, self._fan_avoided_lb(sample["ts"], sample["grid"], minutes),
+                 estimate_ev_avoided_lb(sample, ev_status, self.moer_lb_per_mwh, minutes)),
+            ))
+        except (OSError, sqlite3.Error) as exc:
+            log.warning("[Carbon] Could not save Portal telemetry: %s", exc)
+        if self.publish_drupal:
+            self._farm_cycle(flow, sample["grid"], ev_status, minutes)
+
+    def _farm_cycle(self, flow, net_grid_w, ev_status, minutes):
+        if not all(numeric(value) for value in (flow["pv"], flow["soc"], net_grid_w)):
+            log.warning("[Carbon] Incomplete solar, grid or battery readings — skipping Drupal carbon")
+            return
+        now = time.time()
+        if now - self.outdoor_time >= OUTDOOR_REFRESH_SECONDS:
+            outdoor_f = get_outdoor_f()
+            if outdoor_f is not None:
+                self.outdoor_f, self.outdoor_time = outdoor_f, now
+        if ev_status is not None:
+            self.ev_plugged = ev_status["connected"]
         if self.outdoor_f is None or now - self.outdoor_time > OUTDOOR_MAX_AGE_SECONDS:
             log.warning("[Carbon] No recent outdoor temperature — skipping this reading")
             return
@@ -213,8 +247,7 @@ class CarbonPublisher:
                 log.info("[Carbon] Fresh start: truck %.0f%%, battery %.0f%% (Sol-Ark)",
                          CARBON_START_EV_SOC_PERCENT, flow["soc"])
 
-        net_grid_kw = -signed_grid_watts(flow) / 1000.0
-        grid_buy_kw = max(0.0, net_grid_kw)
+        grid_buy_kw = max(0.0, net_grid_w) / 1000.0
         timestamp = pd.Timestamp.now(tz="America/Detroit")
         result = self.tracker.update(
             timestamp, minutes,
@@ -225,16 +258,6 @@ class CarbonPublisher:
             grid_buy_kw=grid_buy_kw,
         )
         self.tracker.save_state()
-        try:
-            record_carbon(((timestamp.timestamp(), minutes,
-                            float(result["without_ems_co2_lb"]), float(result["with_ems_co2_lb"]),
-                            self._fan_avoided_lb(timestamp.timestamp(), net_grid_kw, minutes)),))
-        except (OSError, sqlite3.Error) as exc:
-            log.warning("[Carbon] Could not save Portal telemetry: %s", exc)
-
-        if not self.publish_drupal:
-            return
-
         self.pending["minutes"] += minutes
         self.pending["grid_buy_kwh"] += grid_buy_kw * minutes / 60.0
         self.pending["moer_minutes"] += self.moer_lb_per_mwh * minutes
@@ -287,11 +310,11 @@ def main() -> None:
     cycle_minutes = max(1, round(PUBLISH_INTERVAL / 60))   # each reading stands for this many minutes
     while True:
         try:
-            flow = fetch_plant_data()
+            flow = fetch_plant_data(preserve_missing=True)
             if flow is None:
                 log.warning("[SolArk] No flow data available — skipping publish")
             else:
-                if publish_drupal:
+                if publish_drupal and all(numeric(flow[key]) for key in ("pv", "grid", "load")):
                     publish_power(flow)
                 if carbon is not None:
                     carbon.cycle(flow, cycle_minutes)

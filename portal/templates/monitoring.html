@@ -198,19 +198,20 @@
             <ul class="legend">
                 {% for key, label in carbon_view.series.items() if carbon.paths[key] %}<li class="{{ key }}">{{ label }}</li>{% endfor %}
             </ul>
-            {% if fan_total_kg is not none %}
-            <span class="muted">Recorded Auto fan savings <strong>{{ '{:,.2f}'.format(fan_total_kg) }} kg CO₂</strong></span>
-            {% endif %}
         </div>
         {% else %}
         <div class="empty"><strong>No CO₂ savings estimate for this time range</strong></div>
         {% endif %}
-        <p class="carbon-caption muted"><strong>Whole farm</strong> compares modeled grid emissions without EMS to measured grid emissions.</p>
-        <p class="carbon-caption muted"><strong>Ventilation fans</strong> compares four fans in Auto with the AC providing the same cooling. The whole-farm estimate already reflects measured ventilation and AC use.</p>
+        <dl class="panel-heading carbon-caption carbon-totals">
+            {% for key, label in carbon_view.series.items() %}
+            {% set total = carbon_totals[key] %}
+            <div><dt class="muted">{{ label }} · selected range</dt>
+                <dd>{% if total is none %}No recorded estimate{% else %}<strong>{{ '{:,.2f}'.format(total) }} kg CO₂</strong>{% endif %}</dd></div>
+            {% endfor %}
+        </dl>
+        <p class="carbon-caption muted"><strong>Ventilation fans</strong> compares four fans in Auto with the AC providing the same cooling.</p>
+        <p class="carbon-caption muted"><strong>EV charging</strong> compares the estimated solar share of measured charging with the same energy drawn from the grid.</p>
         <p class="carbon-caption muted">Positive values mean lower emissions, zero means no change, and negative values mean higher emissions.</p>
-        {% if fan_total_kg is none %}
-        <p class="carbon-caption muted">No Auto fan estimates recorded in this range.</p>
-        {% endif %}
         <p class="carbon-caption muted"><strong>One-hour examples</strong> use a WattTime rate of 1,400 lb CO₂/MWh.</p>
         <p class="carbon-caption muted"><strong>Auto ventilation</strong> saves about <strong>0.16 kg CO₂</strong> in one hour versus AC providing the same cooling, when the farm is buying grid power and the outdoor air is 8°F cooler than the room.</p>
         <p class="carbon-caption muted"><strong>Staged charging</strong> at 6 A (1.44 kW) on surplus solar saves about <strong>0.91 kg CO₂</strong> in one hour compared with drawing the same energy from the grid.</p>

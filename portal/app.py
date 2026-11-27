@@ -32,8 +32,8 @@ from system_state import (
     save_coolbot_targets, save_mode,
 )
 from telemetry_store import (
-    LEGACY_TELEMETRY, TELEMETRY_DB, numeric, read_carbon, read_dashboard, read_egauge_snapshots, read_solark_history,
-    read_solark_workdata,
+    LEGACY_TELEMETRY, TELEMETRY_DB, numeric, read_dashboard, read_egauge_snapshots,
+    read_equipment_carbon, read_solark_history, read_solark_workdata,
 )
 
 log = logging.getLogger(__name__)
@@ -277,11 +277,15 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
                 unavailable = True
         try:
             start, buckets = window(ranges["carbon"])
-            carbon_rows = read_carbon(telemetry, start, now, buckets)
+            carbon_rows = read_equipment_carbon(telemetry, start, now, buckets)
         except (OSError, sqlite3.Error):
             log.exception("[Portal] Could not read carbon estimates")
             carbon_rows = []
-        fan_totals = [row["fan_avoided_kg"] for row in carbon_rows if numeric(row["fan_avoided_kg"])]
+        carbon_totals = {}
+        for key in CARBON_VIEW.series:
+            field = f"{key}_kg"
+            values = [row[field] for row in carbon_rows if numeric(row[field])]
+            carbon_totals[key] = sum(values) if values else None
         diagnostics_time = None
         diagnostics = {}
         try:
@@ -338,7 +342,7 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             egauge=build_chart(meter_rows[ranges["egauge"]], now, chart_periods["egauge"], EGAUGE_VIEW),
             egauge_view=EGAUGE_VIEW, egauge_details=egauge_details,
             carbon=build_chart(carbon_rows, now, chart_periods["carbon"], CARBON_VIEW), carbon_view=CARBON_VIEW,
-            fan_total_kg=sum(fan_totals) if fan_totals else None,
+            carbon_totals=carbon_totals,
             selected_view=selected_view, selected_metric=chosen, diagnostics=diagnostics,
             solark_power_series=SOLARK_VIEWS["power"].series,
             fields=fields, measurable=measurable, solark_status=status,

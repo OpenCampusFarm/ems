@@ -55,8 +55,8 @@ EGAUGE_VIEW = ChartView("Grid and circuit power", "W", 1000, 0, {
     "egauge_ev_w": "EV circuit power",
 })
 CARBON_VIEW = ChartView("Estimated CO₂ avoided", "kg/h", 0.25, 3, {
-    "avoided": "Whole farm",
     "fan_avoided": "Ventilation fans",
+    "ev_avoided": "EV charging",
 })
 
 

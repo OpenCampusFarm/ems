@@ -8,7 +8,7 @@ from itertools import chain
 from coolbot_monitor import CoolBotReading
 from outdoor_monitor import OutdoorReading
 from power_flow import FARM_TIME
-from telemetry_store import DAY, record_carbon, record_samples, record_solark_workdata
+from telemetry_store import DAY, record_equipment_carbon, record_samples, record_solark_workdata
 
 
 def _sample(stamp):
@@ -68,9 +68,9 @@ def write_samples(path):
     )
     record_samples((_sample(now - offset) for offset in chain(older, recent)),
                    path, legacy=None, now=now, egauge_snapshots=snapshots)
-    record_carbon(
-        ((now - offset, 5, 0.08 + 0.04 * math.sin(offset / 7900), 0.05,
-          0.015 * max(0, math.sin(offset / 7900)) if offset <= DAY else None)
+    record_equipment_carbon(
+        ((now - offset, 5, 0.015 * max(0, math.sin(offset / 7900)),
+          0.1 * max(0, math.sin(offset / 11000)))
          for offset in chain(older, recent)),
         path, legacy=None, now=now,
     )

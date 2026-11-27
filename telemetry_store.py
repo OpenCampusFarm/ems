@@ -69,6 +69,14 @@ CREATE TABLE IF NOT EXISTS carbon_samples (
     actual_lb REAL NOT NULL
 ) WITHOUT ROWID
 """
+EQUIPMENT_CARBON_SCHEMA = """
+CREATE TABLE IF NOT EXISTS equipment_carbon_samples (
+    ts REAL PRIMARY KEY,
+    minutes INTEGER NOT NULL CHECK (minutes > 0),
+    fan_avoided_lb REAL,
+    ev_avoided_lb REAL
+) WITHOUT ROWID
+"""
 SAMPLE_FIELDS = ("ts", *NUMERIC_FIELDS, *TEXT_FIELDS)
 INSERT = f"""
 INSERT OR REPLACE INTO samples ({", ".join(SAMPLE_FIELDS)})
@@ -128,7 +136,13 @@ def _begin_write(db, legacy, cutoff):
         db.execute(EGAUGE_SCHEMA)
     if version < 8:
         db.execute("ALTER TABLE carbon_samples ADD COLUMN fan_avoided_lb REAL")
-        db.execute("PRAGMA user_version=8")
+    if version < 9:
+        db.execute(EQUIPMENT_CARBON_SCHEMA)
+        db.execute(
+            """INSERT INTO equipment_carbon_samples (ts, minutes, fan_avoided_lb)
+               SELECT ts, minutes, fan_avoided_lb FROM carbon_samples WHERE fan_avoided_lb IS NOT NULL"""
+        )
+        db.execute("PRAGMA user_version=9")
 
 
 def record_samples(samples, path=TELEMETRY_DB, legacy=LEGACY_TELEMETRY, *, now=None, egauge_snapshots=()):
@@ -158,19 +172,18 @@ def read_egauge_snapshots(path):
                 for source, stamp, readings in db.execute("SELECT source, ts, readings FROM egauge_snapshots")}
 
 
-def record_carbon(samples, path=TELEMETRY_DB, legacy=LEGACY_TELEMETRY, *, now=None):
-    """Save modeled and actual import emissions and optional fan savings in pounds."""
+def record_equipment_carbon(samples, path=TELEMETRY_DB, legacy=LEGACY_TELEMETRY, *, now=None):
+    """Save interval end, minutes, and estimated fan and EV savings in pounds."""
     cutoff = (time.time() if now is None else now) - RETENTION_DAYS * DAY
     with closing(sqlite3.connect(path, timeout=2)) as db, db:
         _begin_write(db, legacy, cutoff)
         db.executemany(
-            """INSERT OR REPLACE INTO carbon_samples
-               (ts, minutes, without_ems_lb, actual_lb, fan_avoided_lb) VALUES (?, ?, ?, ?, ?)""",
-            ((*row[:4], row[4] if len(row) == 5 and numeric(row[4]) else None)
-             for row in samples if len(row) in (4, 5) and all(numeric(value) for value in row[:4])
-             and row[0] >= cutoff),
+            """INSERT OR REPLACE INTO equipment_carbon_samples
+               (ts, minutes, fan_avoided_lb, ev_avoided_lb) VALUES (?, ?, ?, ?)""",
+            ((stamp, minutes, fan_lb if numeric(fan_lb) else None, ev_lb if numeric(ev_lb) else None)
+             for stamp, minutes, fan_lb, ev_lb in samples if numeric(stamp) and stamp >= cutoff),
         )
-        db.execute("DELETE FROM carbon_samples WHERE ts < ?", (cutoff,))
+        db.execute("DELETE FROM equipment_carbon_samples WHERE ts < ?", (cutoff,))
 
 
 def record_solark_workdata(stamp, readings, path=TELEMETRY_DB, legacy=LEGACY_TELEMETRY, *, now=None):
@@ -292,8 +305,8 @@ def read_dashboard(path, legacy, start, end, buckets=()):
         return _dashboard_rows(db, start, end, buckets)
 
 
-def read_carbon(path, start, end, buckets=()):
-    """Return CO₂ avoided rates and fan totals for the recorded minutes in each bucket."""
+def read_equipment_carbon(path, start, end, buckets=()):
+    """Return fan and EV savings as kg/h rates and kg totals."""
     if not path.exists():
         return []
     uri = path.resolve().as_uri() + "?mode=ro"
@@ -301,35 +314,40 @@ def read_carbon(path, start, end, buckets=()):
         db.row_factory = sqlite3.Row
         db.execute("BEGIN")
         version = db.execute("PRAGMA user_version").fetchone()[0]
-        if version < 2:
+        if version < 8:
             return []
-        fan_lb = "fan_avoided_lb" if version >= 8 else "NULL"
+        source = "equipment_carbon_samples" if version >= 9 else "carbon_samples"
+        fields = {"fan": "fan_avoided_lb", "ev": "ev_avoided_lb" if version >= 9 else "NULL"}
         if buckets:
             spans = ", ".join("(?, ?)" for _ in buckets)
             boundaries = [value for bucket in buckets for value in bucket]
+            estimates = ", ".join(
+                f"SUM({field}) * ? / SUM(CASE WHEN {field} IS NOT NULL THEN minutes END) AS {key}_avoided, "
+                f"SUM({field}) * ? AS {key}_avoided_kg"
+                for key, field in fields.items()
+            )
             rows = db.execute(
                 f"""
                 WITH buckets(start, finish) AS (VALUES {spans})
                 SELECT (buckets.start + buckets.finish) / 2.0 AS ts,
                        buckets.start AS bucket_start, buckets.finish AS bucket_end,
-                       SUM(without_ems_lb - actual_lb) * ? / SUM(minutes) AS avoided,
-                       SUM({fan_lb}) * ? / SUM(CASE WHEN {fan_lb} IS NOT NULL THEN minutes END) AS fan_avoided,
-                       SUM({fan_lb}) * ? AS fan_avoided_kg
+                       {estimates}
                 FROM buckets
-                LEFT JOIN carbon_samples
-                     ON carbon_samples.ts >= buckets.start AND carbon_samples.ts < buckets.finish
+                LEFT JOIN {source} ON {source}.ts >= buckets.start AND {source}.ts < buckets.finish
                 GROUP BY buckets.start, buckets.finish
                 ORDER BY buckets.start
                 """,
-                (*boundaries, 60 * KG_PER_LB, 60 * KG_PER_LB, KG_PER_LB),
+                (*boundaries, 60 * KG_PER_LB, KG_PER_LB, 60 * KG_PER_LB, KG_PER_LB),
             )
         else:
+            estimates = ", ".join(
+                f"{field} * ? / minutes AS {key}_avoided, {field} * ? AS {key}_avoided_kg"
+                for key, field in fields.items()
+            )
             rows = db.execute(
                 f"""
-                SELECT ts, (without_ems_lb - actual_lb) * ? / minutes AS avoided,
-                       {fan_lb} * ? / minutes AS fan_avoided, {fan_lb} * ? AS fan_avoided_kg
-                FROM carbon_samples WHERE ts >= ? AND ts <= ? ORDER BY ts
+                SELECT ts, {estimates} FROM {source} WHERE ts >= ? AND ts <= ? ORDER BY ts
                 """,
-                (60 * KG_PER_LB, 60 * KG_PER_LB, KG_PER_LB, start, end),
+                (60 * KG_PER_LB, KG_PER_LB, 60 * KG_PER_LB, KG_PER_LB, start, end),
             )
         return [dict(row) for row in rows]

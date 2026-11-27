@@ -67,7 +67,7 @@ h3 { font-size: 1.08rem; }
 .cooler_w { --accent: #33646b; }
 .grid_l1_w { --accent: #5f649b; }
 .grid_l2_w { --accent: #327999; }
-.avoided { --accent: var(--carbon); }
+.ev_avoided { --accent: var(--carbon); }
 .fan_avoided { --accent: var(--teal); }
 .chart, .control-panel { padding: 16px; min-width: 0; }
 .panel-heading, .chart-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 7px 14px; }
@@ -96,6 +96,8 @@ h3 { font-size: 1.08rem; }
 .legend li.grid::before, .legend li.egauge_grid_w::before, .legend li.solark_grid_w::before, .legend li.grid_l1_w::before, .legend li.fan_avoided::before { border-top-style: dashed; }
 .legend li.grid_l2_w::before { border-top-style: dotted; }
 .carbon-caption { margin-top: 8px; }
+.carbon-totals { justify-content: flex-start; gap: 12px 28px; margin-bottom: 8px; }
+.carbon-totals dd { margin: 2px 0 0; }
 .diagnostic-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
 .diagnostic-picker select { min-height: 44px; max-width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--ink); font: inherit; }
 .diagnostic-picker button { margin: 0; padding: 0 12px; }
