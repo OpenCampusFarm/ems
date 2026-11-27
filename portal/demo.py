@@ -17,9 +17,21 @@ def _sample(stamp):
     weather = 0.79 + 0.18 * math.sin(stamp / (DAY * 0.72))
     solar = 4900 * season * weather * math.sin(math.pi * (hour - 7) / 11) if 7 <= hour <= 18 else 0
     ev = 2200 if 9 < hour < 12 else 1250 if 12 <= hour < 14 else 0
+    cooler = 420 if int(stamp / 600) % 3 else 0
+    load = 180 + cooler + ev
+    battery = -0.35 * max(solar - load, 0) if solar > load else min(110, load - solar)
+    grid = load - solar - battery
     return {
         "ts": stamp,
-        "pv": solar, "grid": 600 + ev - solar, "ev": ev, "ev_current_a": ev / 240,
+        "pv": solar, "grid": grid, "ev": ev, "ev_current_a": ev / 240,
+        "grid_source": "eGauge", "ev_source": "eGauge", "ev_current_a_source": "eGauge",
+        "inverter_load_w": load, "battery_w": battery, "cooler_w": cooler,
+        "grid_l1_w": grid * .46, "grid_l2_w": grid * .54,
+        "l1_v": 123 + 1.1 * math.sin(hour / 3), "l2_v": 124 + .8 * math.sin(hour / 2),
+        "l3_v": 1.9, "grid_l1_a": abs(grid * .46 / 123), "grid_l2_a": abs(grid * .54 / 124),
+        "cooler_a": cooler / 123, "battery_soc": 47 + 24 * math.sin((hour - 9) / 5),
+        "meter_humidity": 38 + 4 * math.cos(hour / 3), "meter_temp_f": 59 + 3 * math.sin(hour / 5),
+        "grid_hz": 60 + .021 * math.sin(stamp / 850),
         "moer": 1040,
         "policy": "staged", "ev_state": "charging" if ev else "idle",
     }

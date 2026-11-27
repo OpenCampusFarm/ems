@@ -85,7 +85,7 @@ class EGaugeClient:
             timeout=TIMEOUT,
         )
         if response.status_code == 200:
-            return {r["name"]: r["rate"] for r in response.json()["registers"]}
+            return {r["name"]: r.get("rate") for r in response.json()["registers"]}
         raise Exception(f"Failed to get registers: {response.status_code}")
 
     def get_grid_power(self):
@@ -101,12 +101,32 @@ class EGaugeClient:
         regs = self.get_registers()
         return {
             # L1/L2 are the two 120 V legs; L3 is an unused voltage input (~2 V)
-            "l1_voltage":        regs["L1 Voltage"],
-            "l2_voltage":        regs["L2 Voltage"],
-            "l3_voltage":        regs["L3 Voltage"],
-            "grid_power":        regs["Grid"],
-            "grid_l1_power":     regs["Grid L1"],
-            "grid_l2_power":     regs["Grid L2"],
-            "cooler_power":      regs["Cooler"],
-            "evcharger_power":   regs["EVC"],
+            "l1_voltage": regs.get("L1 Voltage"),
+            "l2_voltage": regs.get("L2 Voltage"),
+            "l3_voltage": regs.get("L3 Voltage"),
+            "grid_power": regs.get("Grid"),
+            "grid_l1_power": regs.get("Grid L1"),
+            "grid_l2_power": regs.get("Grid L2"),
+            "cooler_power": regs.get("Cooler"),
+            "evcharger_power": regs.get("EVC"),
+            "internal_temperature_c": regs.get("Internal Temperature"),
+            "internal_humidity": regs.get("Internal Humidity"),
+        }
+
+    def get_channel_values(self):
+        channels = self.get_live_data()["values"]
+
+        def rate(name, key="n"):
+            return channels.get(name, {}).get("rate", {}).get(key)
+
+        return {
+            "l1_rms_voltage": rate("L1"),
+            "l2_rms_voltage": rate("L2"),
+            "l3_rms_voltage": rate("L3"),
+            "l1_frequency": rate("L1", "f"),
+            "l2_frequency": rate("L2", "f"),
+            "grid_l1_current": rate("S1"),
+            "grid_l2_current": rate("S2"),
+            "evcharger_current": rate("S5"),
+            "cooler_current": rate("S8"),
         }

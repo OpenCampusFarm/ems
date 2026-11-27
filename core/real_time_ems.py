@@ -29,13 +29,14 @@ from dotenv import load_dotenv
 
 from dashboard_telemetry import publish
 from system_state import read_state
+from telemetry_store import numeric
 
 from Loads.coolbot import change_setpoint, get_coolbot_temp, get_room_temp
 from Loads.openevse import get_status as get_ev_status
 from Loads.openevse import release_claim, set_charging
 from egauge_client import EGaugeClient
 from ev_current_policy import choose_ev_amps, excess_pv_watts
-from solArk_inverter import get_inverter_data
+from solArk_inverter import fetch_plant_data
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -142,15 +143,7 @@ def get_grid_moer() -> float | None:
 
 
 def get_power_data() -> dict | None:
-    raw = _retry(get_inverter_data, retries=3, label="SolArk")
-    if not raw:
-        return None
-    return {
-        "pv": float(raw.get("Solar W", 0)),
-        "grid": float(raw.get("Grid W", 0)),
-        "load": float(raw.get("Consumed W", 0)),
-        "soc": float(raw.get("soc", 0)),
-    }
+    return fetch_plant_data(preserve_missing=True)
 
 
 # ── eGauge meter (measurement only) ───────────────────────────────────────────
@@ -162,14 +155,9 @@ def get_egauge_data() -> dict | None:
     global _egauge
     if _egauge is None:
         _egauge = EGaugeClient()
-    raw = _egauge.get_all_values()
-    # Grid: negative = exporting. CT polarity makes the load readings negative,
-    # so report them as positive consumption.
-    return {
-        "grid": float(raw["grid_power"]),
-        "cooler": abs(float(raw["cooler_power"])),
-        "ev": abs(float(raw["evcharger_power"])),
-    }
+    registers = _retry(_egauge.get_all_values, retries=2, label="eGauge registers")
+    channels = _retry(_egauge.get_channel_values, retries=1, label="eGauge channels")
+    return {**(registers or {}), **(channels or {})} or None
 
 
 # ── EMS decision ─────────────────────────────────────────────────────────────
@@ -192,23 +180,20 @@ def apply_coolbot_target(energy_clean: bool) -> None:
 
 
 def run_ems_cycle(policy: str) -> None:
-    power = get_power_data()
-    if power is None:
-        log.warning("[EMS] Inverter data unavailable — skipping cycle")
-        return
+    power = get_power_data() or {}
 
     moer = get_grid_moer()
     room_temp = _retry(get_room_temp, retries=2, label="CoolBot room temp")
     # Local-network device: no retries, the next cycle tries again.
     ev_data = get_ev_status()
-    egauge = _retry(get_egauge_data, retries=2, label="eGauge")
+    egauge = _retry(get_egauge_data, retries=1, label="eGauge")
 
-    pv_w = power["pv"]
-    grid_w = power["grid"]
-    load_w = power["load"]
+    pv_w = power.get("pv")
+    grid_w = power.get("grid")
+    load_w = power.get("load")
 
     log.info(
-        "[EMS] %s | PV=%.0fW  Grid=%.0fW  Load=%.0fW  MOER=%s  Room=%s",
+        "[EMS] %s | PV=%s W  Grid=%s W  Load=%s W  MOER=%s  Room=%s",
         datetime.now().strftime("%H:%M:%S"),
         pv_w,
         grid_w,
@@ -218,10 +203,10 @@ def run_ems_cycle(policy: str) -> None:
     )
     if egauge is not None:
         log.info(
-            "[eGauge] Grid=%.0fW (neg=export)  Cooler=%.0fW  EV=%.0fW",
-            egauge["grid"],
-            egauge["cooler"],
-            egauge["ev"],
+            "[eGauge] Grid=%s W (neg=export)  Cooler CT=%s W  EV CT=%s W",
+            egauge.get("grid_power"),
+            egauge.get("cooler_power"),
+            egauge.get("evcharger_power"),
         )
     else:
         log.warning("[eGauge] unavailable — measurement skipped")
@@ -236,7 +221,7 @@ def run_ems_cycle(policy: str) -> None:
     publish(power, egauge, ev_data, room_temp, moer, policy,
             coolbot_setpoint_f=get_coolbot_temp())
 
-    pv_producing = pv_w >= PV_MIN_WATTS
+    pv_producing = numeric(pv_w) and pv_w >= PV_MIN_WATTS
     grid_clean = moer is not None and moer < CO2_CLEAN_THRESHOLD
     energy_clean = pv_producing or grid_clean
 
@@ -262,7 +247,10 @@ def run_ems_cycle(policy: str) -> None:
         log.info("[EV] OpenEVSE unavailable — skipping charging decision")
         return
 
-    surplus_w = excess_pv_watts(pv_w, load_w, ev_data["power_w"])
+    surplus_w = (
+        excess_pv_watts(pv_w, load_w, ev_data["power_w"])
+        if numeric(pv_w) and numeric(load_w) else 0.0
+    )
     amps = choose_ev_amps(surplus_w, policy)
     try:
         set_charging(amps > 0, amps)

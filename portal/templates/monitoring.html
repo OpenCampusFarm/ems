@@ -1,4 +1,22 @@
-<div id="monitoring" hx-get="{{ url_for('monitoring', range=selected) }}"
+{% from 'reading_chart.html' import plot %}
+{% macro meter_card(key, label, unit) %}
+<div class="panel metric {{ key }}">
+    <span>{{ label }}</span>
+    {% if numeric(latest.get(key)) %}
+    <span class="metric-detail">{{ latest.get(key ~ '_source') or meter_sources[key] }}</span>
+    {% endif %}
+    <div class="metric-reading">
+        {% if numeric(latest.get(key)) %}
+        <strong>{{ ('%.3f' | format(latest[key] / 1000)) if unit == 'W'
+                   else (('%.3f' if unit == 'Hz' else '%.1f') | format(latest[key])) }}</strong>
+        {% else %}
+        <strong>—</strong>
+        {% endif %}
+        <small>{{ 'kW' if unit == 'W' else unit }}</small>
+    </div>
+</div>
+{% endmacro %}
+<div id="monitoring" hx-get="{{ url_for('monitoring', range=selected, view=selected_view) }}"
      hx-trigger="every 15s, refresh-monitoring" hx-swap="outerHTML" hx-sync="this:drop">
     <div class="status">
         <div><strong>EMS service</strong><span class="badge {{ 'running' if ems_service == 'Running' }}">{{ ems_service }}</span></div>
@@ -9,14 +27,7 @@
     {% if unavailable %}<p class="notice error" role="status">Telemetry is temporarily unavailable.</p>{% endif %}
     {% if stale %}<p class="notice">Showing the last recorded measurements. The EMS has not published a sample in over 12 minutes.</p>{% endif %}
     <div class="metrics">
-        <div class="panel metric ev">
-            <span>OpenEVSE charge current</span>
-            {% if numeric(latest.get('ev')) %}<span class="metric-detail">{{ '%.0f' | format(latest.ev) }} W</span>{% endif %}
-            <div class="metric-reading">
-                <strong>{{ '%.1f' | format(latest.ev_current_a) if numeric(latest.get('ev_current_a')) else '—' }}</strong>
-                <small>A</small>
-            </div>
-        </div>
+        {{ meter_card('ev_current_a', views.current.series.ev_current_a, 'A') }}
         <div class="panel metric watttime">
             <span>WattTime MOER</span>
             {% if numeric(latest.get('moer')) %}
@@ -29,15 +40,8 @@
                 <small>lb&nbsp;CO₂<wbr>/MWh</small>
             </div>
         </div>
-        {% for key, label in series.items() if key != 'ev' %}
-        <div class="panel metric {{ key }}">
-            <span>{{ label }}</span>
-            <div class="metric-reading">
-                <strong>{{ '%.2f' | format(latest[key] / 1000) if numeric(latest.get(key)) else '—' }}</strong>
-                <small>kW</small>
-            </div>
-        </div>
-        {% endfor %}
+        {{ meter_card('pv', views.power.series.pv, 'W') }}
+        {{ meter_card('grid', views.power.series.grid, 'W') }}
         {% for key, label, field, pattern in (
             ('room', 'Cool room temperature', 'room_f', '%.1f'),
             ('setpoint', 'CoolBot setpoint', 'setpoint_f', '%g')
@@ -55,79 +59,54 @@
             </div>
         </div>
         {% endfor %}
+        {% for meter_view in views.values() %}
+            {% for key, label in meter_view.series.items() if key not in ['pv', 'grid', 'ev_current_a'] %}
+            {{ meter_card(key, label, meter_view.unit) }}
+            {% endfor %}
+        {% endfor %}
     </div>
     <section class="panel chart">
-        <div class="panel-heading"><h2>Power flow</h2><span class="muted">W · {{ period.summary }} · ET</span></div>
-        <nav class="periods" aria-label="Power flow time range">
+        <div class="panel-heading"><h2>Electrical readings</h2><span class="muted">{{ view.unit }} · {{ period.summary }} · ET</span></div>
+        <nav class="periods" aria-label="Chart time range">
             {% for key, option in periods.items() %}
-            <a id="power-period-{{ key }}" href="{{ url_for('index', range=key) }}"
-               hx-get="{{ url_for('monitoring', range=key) }}" hx-target="#monitoring"
-               hx-swap="outerHTML" hx-sync="#monitoring:replace" hx-replace-url="{{ url_for('index', range=key) }}"
+            <a id="power-period-{{ key }}" href="{{ url_for('index', range=key, view=selected_view) }}"
+               hx-get="{{ url_for('monitoring', range=key, view=selected_view) }}" hx-target="#monitoring"
+               hx-swap="outerHTML" hx-sync="#monitoring:replace" hx-replace-url="{{ url_for('index', range=key, view=selected_view) }}"
                {% if key == selected %}aria-current="true"{% endif %}>{{ option.label }}</a>
             {% endfor %}
         </nav>
-        {% if chart.available or carbon.available %}
-        <div class="plot{% if carbon.available %} with-carbon{% endif %}" role="group"
-             aria-label="Power in watts{% if carbon.available %} and estimated CO₂ avoided in kilograms per hour{% endif %}. {{ period.summary }}">
-            <svg viewBox="0 0 44 176" preserveAspectRatio="none" aria-hidden="true">
-                {% for y, label in chart.ticks if chart.available %}<text x="40" y="{{ y }}" dominant-baseline="middle" text-anchor="end">{{ label }}</text>{% endfor %}
-            </svg>
-            <div id="power-chart-viewport" class="chart-viewport" tabindex="0" aria-label="Explore chart values with the left and right arrow keys"
-                 data-power='{{ chart.readout | tojson }}' data-carbon='{{ carbon.readout | tojson }}'
-                 data-start="{{ chart.start }}" data-end="{{ chart.end }}">
-                <svg viewBox="52 0 632 176" preserveAspectRatio="none" aria-hidden="true">
-                    {% for y, label in chart.ticks if chart.available %}<line x1="52" y1="{{ y }}" x2="684" y2="{{ y }}" class="{{ 'zero' if label == '0' else '' }}"/>{% endfor %}
-                    {% if carbon.available %}
-                    {% for y, label in carbon.ticks if label == '0' %}
-                    <line x1="52" y1="{{ y }}" x2="684" y2="{{ y }}" class="carbon-zero"/>
-                    {% endfor %}
-                    {% endif %}
-                    {% for key, segments in (chart.paths.items() | list) + (carbon.paths.items() | list) %}
-                        {% for segment in segments %}
-                            {% if segment | length == 1 %}
-                                <circle class="{{ key }}" cx="{{ segment[0][0] }}" cy="{{ segment[0][1] }}" r="2.8"/>
-                            {% else %}
-                                <polyline class="{{ key }}" points="{% for x,y in segment %}{{ x }},{{ y }} {% endfor %}"/>
-                            {% endif %}
-                        {% endfor %}
-                    {% endfor %}
-                    <g class="chart-cursor" visibility="hidden">
-                        <line x1="52" y1="6" x2="52" y2="170"/>
-                        {% for key in ['pv', 'grid', 'ev', 'avoided'] %}
-                        <circle class="{{ key }}" r="4" visibility="hidden" data-marker="{{ key }}"/>
-                        {% endfor %}
-                    </g>
-                </svg>
-                <div class="chart-readout" role="status" hidden>
-                    <strong data-readout-time></strong>
-                    <dl></dl>
-                </div>
-            </div>
-            {% if carbon.available %}
-            <svg class="carbon-axis" viewBox="0 0 36 176" preserveAspectRatio="none" aria-hidden="true">
-                {% for y, label in carbon.ticks %}
-                <text x="6" y="{{ y }}" dominant-baseline="middle">{{ label }}</text>
-                {% endfor %}
-            </svg>
-            {% endif %}
-            <div class="times" aria-hidden="true">{% for label in chart.times %}<span>{{ label }}</span>{% endfor %}</div>
-        </div>
+        <nav class="periods" aria-label="Electrical measurement type">
+            {% for key, option in views.items() %}
+            <a href="{{ url_for('index', range=selected, view=key) }}"
+               hx-get="{{ url_for('monitoring', range=selected, view=key) }}" hx-target="#monitoring"
+               hx-swap="outerHTML" hx-sync="#monitoring:replace" hx-replace-url="{{ url_for('index', range=selected, view=key) }}"
+               {% if key == selected_view %}aria-current="true"{% endif %}>{{ option.label }}</a>
+            {% endfor %}
+        </nav>
+        {% if chart.available %}
+        {{ plot(chart, view, 'power-chart-viewport') }}
         <div class="chart-footer">
             <ul class="legend">
-                {% for key, label in series.items() %}<li class="{{ key }}">{{ label }}</li>{% endfor %}
-                {% if carbon.available %}<li class="avoided">Estimated CO₂ avoided (kg/h · right axis)</li>{% endif %}
+                {% for key, label in view.series.items() if chart.paths[key] %}<li class="{{ key }}">{{ label }}</li>{% endfor %}
             </ul>
-            <span class="muted">Negative grid power = export</span>
+            {% if selected_view == 'power' %}
+            <span class="muted">Negative grid power = export. Negative battery power = charging.</span>
+            {% endif %}
         </div>
         {% else %}
         <div class="empty">
-            {% if latest %}<strong>No power readings in this time range</strong>
+            {% if latest %}<strong>No {{ view.label | lower }} readings in this time range</strong>
             {% else %}<strong>Waiting for EMS telemetry</strong><span>Measurements appear after the EMS completes a cycle.</span>{% endif %}
         </div>
         {% endif %}
-        <p class="carbon-caption muted"><strong>Estimated CO₂ avoided</strong> compares modeled grid emissions without EMS to measured grid emissions. Positive means lower measured emissions, zero means equal, and negative means higher measured emissions.</p>
-        {% if not carbon.available %}
-        <p class="carbon-caption muted">No CO₂ savings estimate for this time range.</p>
+    </section>
+    <section class="panel chart carbon-chart">
+        <div class="panel-heading"><h2>Estimated CO₂ avoided</h2><span class="muted">kg/h · {{ period.summary }} · ET</span></div>
+        {% if carbon.available %}
+        {{ plot(carbon, carbon_view, 'carbon-chart-viewport') }}
+        {% else %}
+        <div class="empty"><strong>No CO₂ savings estimate for this time range</strong></div>
         {% endif %}
+        <p class="carbon-caption muted">Compares modeled grid emissions without EMS to measured grid emissions. Positive means lower measured emissions, zero means equal, and negative means higher measured emissions.</p>
     </section>
 </div>

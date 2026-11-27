@@ -21,7 +21,8 @@ from process_control import apply_mode, service_status
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from power_flow import (
-    CARBON_SERIES, DEFAULT_PERIOD, FARM_TIME, GAP, PERIODS, SERIES, build_chart, chart_buckets,
+    CARBON_VIEW, DEFAULT_PERIOD, DEFAULT_VIEW, FARM_TIME, GAP, METER_SOURCES, PERIODS, VIEWS,
+    build_chart, chart_buckets,
 )
 from system_state import (
     COOLBOT_MAX_F, COOLBOT_MIN_F, DATABASE, MODES, mark_applied, read_state,
@@ -217,6 +218,10 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
         if key not in PERIODS:
             key = DEFAULT_PERIOD
         period = PERIODS[key]
+        selected_view = request.args.get("view", DEFAULT_VIEW)
+        if selected_view not in VIEWS:
+            selected_view = DEFAULT_VIEW
+        view = VIEWS[selected_view]
         now = time.time()
         start = now - period.duration
         buckets = chart_buckets(start, now, period.bucket)
@@ -241,8 +246,9 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             else None
         )
         return render_template(
-            "monitoring.html", latest=latest, chart=build_chart(rows, now, period, unit_scale=1), series=SERIES,
-            carbon=build_chart(carbon_rows, now, period, series=CARBON_SERIES, step=0.25, unit_scale=1),
+            "monitoring.html", latest=latest, chart=build_chart(rows, now, period, view),
+            carbon=build_chart(carbon_rows, now, period, CARBON_VIEW), carbon_view=CARBON_VIEW,
+            views=VIEWS, view=view, selected_view=selected_view, meter_sources=METER_SOURCES,
             periods=PERIODS, selected=key, period=period, unavailable=unavailable,
             last_sample=datetime.fromtimestamp(latest["ts"], FARM_TIME).strftime("%b %d, %H:%M")
             if latest else None,

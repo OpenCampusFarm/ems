@@ -1,14 +1,12 @@
 """Time windows and SVG chart data for the Portal power-flow views."""
 
 from datetime import datetime, time, timedelta
-from math import ceil
+from math import ceil, floor
 from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 from telemetry_store import DAY, numeric
 
-SERIES = {"pv": "Solar production", "grid": "Grid power", "ev": "EV charging"}
-CARBON_SERIES = {"avoided": "Estimated CO₂ avoided"}
 FARM_TIME = ZoneInfo("America/Detroit")
 HOUR = 3600
 GAP = 12 * 60
@@ -20,6 +18,59 @@ class Period(NamedTuple):
     summary: str
     tick_format: str
     bucket: int = 0
+
+
+class ChartView(NamedTuple):
+    label: str
+    unit: str
+    step: float
+    precision: int
+    series: dict
+    include_zero: bool = True
+
+
+VIEWS = {
+    "power": ChartView("Power", "W", 1000, 0, {
+        "pv": "Solar production",
+        "grid": "Grid power",
+        "ev": "EV circuit power",
+        "inverter_load_w": "Inverter load",
+        "battery_w": "Stationary battery power",
+        "cooler_w": "Cooler circuit power",
+        "grid_l1_w": "Grid L1 power",
+        "grid_l2_w": "Grid L2 power",
+    }),
+    "voltage": ChartView("Voltage", "V", 25, 1, {
+        "l1_v": "L1 voltage",
+        "l2_v": "L2 voltage",
+        "l3_v": "L3 voltage (unused)",
+    }),
+    "current": ChartView("Current", "A", 2, 1, {
+        "ev_current_a": "EV charge current",
+        "grid_l1_a": "Grid L1 current",
+        "grid_l2_a": "Grid L2 current",
+        "cooler_a": "Cooler current",
+    }),
+    "percent": ChartView("Percent", "%", 100, 1, {
+        "battery_soc": "Stationary battery charge",
+        "meter_humidity": "eGauge humidity",
+    }),
+    "temperature": ChartView("Meter temperature", "°F", 5, 1, {
+        "meter_temp_f": "eGauge temperature",
+    }, include_zero=False),
+    "frequency": ChartView("Frequency", "Hz", 0.05, 3, {
+        "grid_hz": "Grid frequency",
+    }, include_zero=False),
+}
+CARBON_VIEW = ChartView("Estimated CO₂ avoided", "kg/h", 0.25, 3, {"avoided": "Estimated CO₂ avoided"})
+DEFAULT_VIEW = "power"
+
+METER_SOURCES = {
+    key: "Sol-Ark" if key in ("pv", "inverter_load_w", "battery_w", "battery_soc") else "eGauge"
+    for view in VIEWS.values() for key in view.series
+}
+# Older EV telemetry was collected directly from the charger.
+METER_SOURCES.update(ev="OpenEVSE", ev_current_a="OpenEVSE")
 
 
 PERIODS = {
@@ -58,11 +109,16 @@ def chart_buckets(start, end, size):
     return spans
 
 
-def build_chart(rows, end, period, *, series=SERIES, step=1000, unit_scale=1000):
+def build_chart(rows, end, period, view):
     start = end - period.duration
+    series, step = view.series, view.step
     values = [row[key] for row in rows for key in series if numeric(row.get(key))]
-    high = max(step, ceil(max(values, default=0) / step) * step)
-    low = min(0, -ceil(-min(values, default=0) / step) * step)
+    if view.include_zero:
+        low = min(0, floor(min(values, default=0) / step) * step)
+        high = max(step, ceil(max(values, default=0) / step) * step)
+    else:
+        low = floor(min(values, default=0) / step) * step
+        high = max(low + step, ceil(max(values, default=0) / step) * step)
 
     def y(value):
         return 12 + (high - value) * 152 / (high - low)
@@ -93,9 +149,12 @@ def build_chart(rows, end, period, *, series=SERIES, step=1000, unit_scale=1000)
         paths[key] = segments
         readout[key] = points
 
-    ticks = [(12, f"{high / unit_scale:g}"), (y(0), "0")]
-    if low:
-        ticks.append((164, f"{low / unit_scale:g}"))
+    ticks = [(12, f"{high:g}"), (164, f"{low:g}")]
+    if low < 0 < high:
+        ticks.insert(1, (y(0), "0"))
+    elif high - low > step:
+        middle = (high + low) / 2
+        ticks.insert(1, (y(middle), f"{middle:g}"))
     times = [
         datetime.fromtimestamp(start + period.duration * i / 4, FARM_TIME).strftime(period.tick_format)
         for i in range(5)

@@ -26,7 +26,7 @@ Every `POLL_INTERVAL` seconds (default 300s):
 3. Use the CoolBot clean-energy target (default 45°F) if PV is at least 500 W or MOER is below 1400 lbs CO₂/MWh. Otherwise use the other target (default 50°F). The portal saves both values in `system.db` and core reads them each cycle.
 4. Estimate surplus solar by subtracting the non-EV load from SolArk's PV output. Apply the saved EV charging policy.
 
-(Each cycle also logs eGauge grid / CoolBot / EV power for monitoring; it does not affect the decision.)
+The portal records eGauge circuits, line voltages, frequency and meter environment along with Sol-Ark inverter and battery readings each cycle. It prefers the eGauge grid reading and uses signed Sol-Ark grid power when that reading is missing. These source choices apply to monitoring. EV decisions use the Sol-Ark PV and load readings and the OpenEVSE charging power.
 
 - **Staged (default)** requests the highest of 6, 20, 34, or 48 A that estimated surplus solar covers at 240 V. It pauses below 1.44 kW of estimated surplus.
 - **Binary** requests 12 A when estimated surplus is at least 2.88 kW and pauses below that threshold.

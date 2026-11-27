@@ -19,9 +19,17 @@ KG_PER_LB = 0.45359237
 
 log = logging.getLogger(__name__)
 
-NUMERIC_FIELDS = ("pv", "grid", "ev", "room", "moer", "ev_current_a", "coolbot_setpoint_f")
-TEXT_FIELDS = ("ev_state", "policy")
-SCHEMA = """
+ELECTRICAL_FIELDS = (
+    "grid_l1_w", "grid_l2_w", "cooler_w", "inverter_load_w", "battery_w", "battery_soc",
+    "l1_v", "l2_v", "l3_v", "grid_l1_a", "grid_l2_a", "cooler_a", "meter_humidity",
+    "meter_temp_f", "grid_hz",
+)
+SOURCE_FIELDS = ("grid_source", "ev_source", "ev_current_a_source")
+NUMERIC_FIELDS = ("pv", "grid", "ev", "room", "moer", "ev_current_a", "coolbot_setpoint_f", *ELECTRICAL_FIELDS)
+TEXT_FIELDS = ("ev_state", "policy", *SOURCE_FIELDS)
+DASHBOARD_FIELDS = ("pv", "grid", "ev", "ev_current_a", *ELECTRICAL_FIELDS)
+EXTRA_COLUMNS = [*(f"{field} REAL" for field in ELECTRICAL_FIELDS), *(f"{field} TEXT" for field in SOURCE_FIELDS)]
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS samples (
     ts REAL PRIMARY KEY,
     pv REAL,
@@ -32,7 +40,8 @@ CREATE TABLE IF NOT EXISTS samples (
     ev_state TEXT,
     policy TEXT,
     ev_current_a REAL,
-    coolbot_setpoint_f REAL
+    coolbot_setpoint_f REAL,
+    {", ".join(EXTRA_COLUMNS)}
 ) WITHOUT ROWID
 """
 CARBON_SCHEMA = """
@@ -43,11 +52,10 @@ CREATE TABLE IF NOT EXISTS carbon_samples (
     actual_lb REAL NOT NULL
 ) WITHOUT ROWID
 """
-INSERT = """
-INSERT OR REPLACE INTO samples (
-    ts, pv, grid, ev, room, moer, ev_current_a, coolbot_setpoint_f, ev_state, policy
-)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+SAMPLE_FIELDS = ("ts", *NUMERIC_FIELDS, *TEXT_FIELDS)
+INSERT = f"""
+INSERT OR REPLACE INTO samples ({", ".join(SAMPLE_FIELDS)})
+VALUES ({", ".join("?" for _ in SAMPLE_FIELDS)})
 """
 
 
@@ -91,8 +99,11 @@ def _begin_write(db, legacy, cutoff):
         db.execute("ALTER TABLE samples ADD COLUMN ev_current_a REAL")
     if 1 <= version < 4:
         db.execute("ALTER TABLE samples ADD COLUMN coolbot_setpoint_f REAL")
-    if version < 4:
-        db.execute("PRAGMA user_version=4")
+    if 1 <= version < 5:
+        for column in EXTRA_COLUMNS:
+            db.execute(f"ALTER TABLE samples ADD COLUMN {column}")
+    if version < 5:
+        db.execute("PRAGMA user_version=5")
 
 
 def record_samples(samples, path=TELEMETRY_DB, legacy=LEGACY_TELEMETRY, *, now=None):
@@ -118,6 +129,8 @@ def record_carbon(samples, path=TELEMETRY_DB, legacy=LEGACY_TELEMETRY, *, now=No
 
 def _dashboard_rows(db, start, end, buckets):
     db.row_factory = sqlite3.Row
+    available = {column["name"] for column in db.execute("PRAGMA table_info(samples)")}
+    fields = [field for field in DASHBOARD_FIELDS if field in available]
     latest = db.execute(
         "SELECT * FROM samples WHERE ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT 1",
         (end - RETENTION_DAYS * DAY, end),
@@ -126,12 +139,13 @@ def _dashboard_rows(db, start, end, buckets):
         # The primary key allows an indexed scan over each bucket's time range.
         spans = ", ".join("(?, ?)" for _ in buckets)
         boundaries = [value for bucket in buckets for value in bucket]
+        averages = ", ".join(f"AVG(samples.{field}) AS {field}" for field in fields)
         rows = db.execute(
             f"""
             WITH buckets(start, finish) AS (VALUES {spans})
             SELECT (buckets.start + buckets.finish) / 2.0 AS ts,
                    buckets.start AS bucket_start, buckets.finish AS bucket_end,
-                   AVG(samples.pv) AS pv, AVG(samples.grid) AS grid, AVG(samples.ev) AS ev
+                   {averages}
             FROM buckets
             LEFT JOIN samples ON samples.ts >= buckets.start AND samples.ts < buckets.finish
             GROUP BY buckets.start, buckets.finish
@@ -141,7 +155,7 @@ def _dashboard_rows(db, start, end, buckets):
         )
     else:
         rows = db.execute(
-            "SELECT ts, pv, grid, ev FROM samples WHERE ts >= ? AND ts <= ? ORDER BY ts",
+            f"SELECT ts, {', '.join(fields)} FROM samples WHERE ts >= ? AND ts <= ? ORDER BY ts",
             (start, end),
         )
     return dict(latest) if latest is not None else {}, [dict(row) for row in rows]

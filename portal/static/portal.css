@@ -53,7 +53,15 @@ h3 { font-size: 1.08rem; }
 .metric.watttime { --accent: var(--carbon); }
 .pv { --accent: var(--pv); }
 .grid { --accent: var(--grid); }
-.ev { --accent: var(--ev); }
+.ev, .ev_current_a { --accent: var(--ev); }
+.inverter_load_w { --accent: #9a472a; }
+.battery_w, .battery_soc { --accent: #7144a3; }
+.cooler_w, .cooler_a { --accent: #33646b; }
+.grid_l1_w, .grid_l1_a, .l1_v { --accent: #5f649b; }
+.grid_l2_w, .grid_l2_a, .l2_v { --accent: #327999; }
+.l3_v { --accent: #8b5d45; }
+.meter_humidity, .grid_hz { --accent: #198078; }
+.meter_temp_f { --accent: #a2552b; }
 .avoided { --accent: var(--carbon); }
 .chart, .control-panel { padding: 16px; min-width: 0; }
 .panel-heading, .chart-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 7px 14px; }
@@ -63,23 +71,24 @@ h3 { font-size: 1.08rem; }
 .periods a:hover { background: #dce8eb; }
 .periods a[aria-current] { background: var(--teal); color: #fff; }
 .periods a:focus-visible { outline: 3px solid #008b80; outline-offset: 2px; }
-.plot { display: grid; grid-template-columns: 44px minmax(0, 1fr); margin-top: 10px; }
-.plot.with-carbon { grid-template-columns: 44px minmax(0, 1fr) 36px; }
+.plot { display: grid; grid-template-columns: 48px minmax(0, 1fr); margin-top: 10px; }
 .plot svg { display: block; width: 100%; height: 184px; overflow: visible; }
 .plot line { stroke: #dae5e9; vector-effect: non-scaling-stroke; }
 .plot line.zero { stroke: #91a7ae; }
-.plot line.carbon-zero { stroke: var(--carbon); stroke-dasharray: 1 4; opacity: .65; }
+.carbon-chart { margin-top: 12px; }
+.carbon-chart .plot line.zero { stroke: var(--carbon); stroke-dasharray: 1 4; opacity: .65; }
 .plot polyline { fill: none; stroke: var(--accent); stroke-width: 2.3px; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
 .plot polyline.grid { stroke-dasharray: 5 3; }
+.plot polyline.grid_l1_w { stroke-dasharray: 9 4; }
+.plot polyline.grid_l2_w { stroke-dasharray: 2 3; }
 .plot circle { fill: var(--accent); }
-.plot polyline.avoided { stroke-dasharray: 8 3 2 3; }
 .plot text { fill: var(--muted); font-family: inherit; font-size: 12px; }
-.plot .carbon-axis text { fill: var(--carbon); }
 .times { grid-column: 2; display: flex; justify-content: space-between; color: var(--muted); font-size: .825rem; font-variant-numeric: tabular-nums; }
 .chart-footer { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 15px; padding: 0; margin: 0; list-style: none; font-size: .875rem; }
 .legend li::before { content: ""; display: inline-block; width: 16px; border-top: 3px solid var(--accent); margin-inline-end: 6px; vertical-align: middle; }
-.legend li.grid::before { border-top-style: dashed; }
+.legend li.grid::before, .legend li.grid_l1_w::before { border-top-style: dashed; }
+.legend li.grid_l2_w::before { border-top-style: dotted; }
 .carbon-caption { margin-top: 8px; }
 .empty { min-height: 190px; display: grid; place-content: center; gap: 6px; text-align: center; color: var(--muted); }
 .section-title { margin: 22px 0 9px; }

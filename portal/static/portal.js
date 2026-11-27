@@ -11,12 +11,6 @@ if (connectionAlert) {
     });
 }
 
-const chartSeries = [
-    ["pv", "Solar", "W"],
-    ["grid", "Grid", "W"],
-    ["ev", "EV charging", "W"],
-    ["avoided", "CO₂ avoided", "kg/h"],
-];
 const chartTime = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Detroit", month: "short", day: "numeric", year: "numeric",
     hour: "numeric", minute: "2-digit", timeZoneName: "short",
@@ -40,7 +34,10 @@ function setupChart(viewport) {
     if (viewport.dataset.initialized) return;
     viewport.dataset.initialized = "true";
 
-    const points = {...JSON.parse(viewport.dataset.power), ...JSON.parse(viewport.dataset.carbon)};
+    const points = JSON.parse(viewport.dataset.points);
+    const series = JSON.parse(viewport.dataset.series).filter(([key]) => points[key]?.length);
+    const unit = viewport.dataset.unit;
+    const precision = Number(viewport.dataset.precision);
     const timeline = Array.from(new Map(
         Object.values(points).flat().map(point => [point.ts, point])
     ).values()).sort((a, b) => a.ts - b.ts);
@@ -74,14 +71,14 @@ function setupChart(viewport) {
 
         const values = tooltip.querySelector("dl");
         values.replaceChildren();
-        for (const [key, label, unit] of chartSeries) {
+        for (const [key, label] of series) {
             const item = closestChartPoint(points[key] || [], point.ts);
             const present = item && (intervalChart ? item.ts === point.ts : Math.abs(item.ts - point.ts) <= maxDistance);
             const name = document.createElement("dt");
             name.textContent = label;
             const value = document.createElement("dd");
             value.textContent = present ? `${item.value.toLocaleString("en-US", {
-                maximumFractionDigits: key === "avoided" ? 3 : 0,
+                maximumFractionDigits: precision,
                 minimumFractionDigits: key === "avoided" ? 2 : 0,
             })} ${unit}` : "—";
             if (present && Math.floor(item.ts / 60) !== Math.floor(point.ts / 60)) {

@@ -1,6 +1,7 @@
 import os
 import time
 from datetime import datetime
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,14 @@ API_USERNAME = os.getenv("SOLARK_USERNAME")
 API_PASSWORD = os.getenv("SOLARK_PASSWORD")
 PLANT_ID = os.getenv("SOLARK_PLANT_ID", "139155")
 BASE_URL = "https://ecsprod-api-new.solarkcloud.com"
+
+FLOW_FIELDS = {
+    "pv": "pvPower",
+    "battery": "battPower",
+    "grid": "gridOrMeterPower",
+    "load": "loadOrEpsPower",
+    "soc": "soc",
+}
 
 
 def get_access_token() -> str | None:
@@ -50,23 +59,29 @@ def get_access_token() -> str | None:
         return None
 
 
-def parse_flow_data(flow_response: dict[str, Any]) -> dict[str, float]:
-    try:
-        data = flow_response.get("data", {})
-        return {
-            "pv":      float(data.get("pvPower", 0)),
-            "battery": float(data.get("battPower", 0)),
-            "grid":    float(data.get("gridOrMeterPower", 0)),
-            "load":    float(data.get("loadOrEpsPower", 0)),
-            "soc":     float(data.get("soc", 0)),
-            "grid_buying": bool(data.get("gridTo", False)),
-        }
-    except Exception as e:
-        print(f"[ERROR] Failed to parse flow data: {e}")
-        return {"pv": 0, "battery": 0, "grid": 0, "load": 0, "soc": 0, "grid_buying": False}
+def parse_flow_data(flow_response: dict[str, Any], *, preserve_missing=False) -> dict:
+    data = flow_response.get("data") or {}
+    missing = None if preserve_missing else 0.0
+    flow = {}
+    for name, field in FLOW_FIELDS.items():
+        value = data.get(field)
+        try:
+            number = float(value) if not isinstance(value, bool) else float("nan")
+        except (ValueError, TypeError):
+            number = float("nan")
+        flow[name] = number if isfinite(number) else missing
+
+    flow["grid_buying"] = data.get("gridTo") if preserve_missing else bool(data.get("gridTo"))
+    if preserve_missing:
+        flow.update(
+            grid_selling=data.get("toGrid"),
+            battery_charging=data.get("toBat"),
+            battery_discharging=data.get("batTo"),
+        )
+    return flow
 
 
-def fetch_plant_data() -> dict[str, float] | None:
+def fetch_plant_data(*, preserve_missing=False) -> dict | None:
     global cached_token, token_expiry
 
     token = get_access_token()
@@ -98,7 +113,7 @@ def fetch_plant_data() -> dict[str, float] | None:
             print(f"[ERROR] API error code: {raw_data.get('code')}, msg: {raw_data.get('msg')}")
             return None
 
-        parsed_data = parse_flow_data(raw_data)
+        parsed_data = parse_flow_data(raw_data, preserve_missing=preserve_missing)
         print(
             f"[DATA] PV={parsed_data['pv']}W  Battery={parsed_data['battery']}W  "
             f"Grid={parsed_data['grid']}W  Load={parsed_data['load']}W  SOC={parsed_data['soc']}%"

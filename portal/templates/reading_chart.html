@@ -1,0 +1,39 @@
+{% macro plot(chart, view, viewport_id) %}
+<div class="plot" role="group" aria-label="{{ view.label }} ({{ view.unit }})">
+    <svg viewBox="0 0 48 176" preserveAspectRatio="none" aria-hidden="true">
+        {% for y, label in chart.ticks %}
+        <text x="44" y="{{ y }}" dominant-baseline="middle" text-anchor="end">{{ label }}</text>
+        {% endfor %}
+    </svg>
+    <div id="{{ viewport_id }}" class="chart-viewport" tabindex="0" aria-label="{{ view.label }} chart. Explore values with the left and right arrow keys."
+         data-points='{{ chart.readout | tojson }}' data-series='{{ view.series | items | list | tojson }}'
+         data-unit="{{ view.unit }}" data-precision="{{ view.precision }}"
+         data-start="{{ chart.start }}" data-end="{{ chart.end }}">
+        <svg viewBox="52 0 632 176" preserveAspectRatio="none" aria-hidden="true">
+            {% for y, label in chart.ticks %}
+            <line x1="52" y1="{{ y }}" x2="684" y2="{{ y }}" class="{{ 'zero' if label == '0' else '' }}"/>
+            {% endfor %}
+            {% for key, segments in chart.paths.items() %}
+                {% for segment in segments %}
+                    {% if segment | length == 1 %}
+                    <circle class="{{ key }}" cx="{{ segment[0][0] }}" cy="{{ segment[0][1] }}" r="2.8"/>
+                    {% else %}
+                    <polyline class="{{ key }}" points="{% for x,y in segment %}{{ x }},{{ y }} {% endfor %}"/>
+                    {% endif %}
+                {% endfor %}
+            {% endfor %}
+            <g class="chart-cursor" visibility="hidden">
+                <line x1="52" y1="6" x2="52" y2="170"/>
+                {% for key in view.series %}
+                <circle class="{{ key }}" r="4" visibility="hidden" data-marker="{{ key }}"/>
+                {% endfor %}
+            </g>
+        </svg>
+        <div class="chart-readout" role="status" hidden>
+            <strong data-readout-time></strong>
+            <dl></dl>
+        </div>
+    </div>
+    <div class="times" aria-hidden="true">{% for label in chart.times %}<span>{{ label }}</span>{% endfor %}</div>
+</div>
+{% endmacro %}
