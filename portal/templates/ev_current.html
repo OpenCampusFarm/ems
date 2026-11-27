@@ -1,7 +1,7 @@
 <div id="ev-current-control" class="ev-current-control">
     {% if current_error %}<p class="notice error" role="alert">{{ current_error }}</p>{% endif %}
     {% if state and state.ems == 'on' %}
-    {% set amps = state.ev_manual_amps %}
+    {% set amps = charger_amps if charger_amps is not none else state.ev_manual_amps %}
     {% set current_label = (amps ~ ' A') if amps is not none else '—' %}
     <form method="post" action="{{ url_for('set_ev_current') }}"
           hx-post="{{ url_for('set_ev_current') }}" hx-trigger="submit, change from:#ev-current-slider"
@@ -17,13 +17,19 @@
             <div class="ev-current-track">
                 <span aria-hidden="true">0 A</span>
                 <input id="ev-current-slider" type="range" min="{{ ev_min - 1 }}" max="{{ ev_max }}" step="1"
-                       value="{{ amps or ev_min - 1 }}" aria-valuetext="{{ current_label if amps is not none else '0 A (pause)' }}">
+                       value="{{ amps or ev_min - 1 }}" aria-valuetext="{{ current_label if amps is not none else 'Current unavailable' }}">
                 <span aria-hidden="true">{{ ev_max }} A</span>
             </div>
             <button class="retry" type="submit" name="mode" value="pause">Pause charging</button>
         </fieldset>
         <p class="applying" role="status">Requesting current…</p>
     </form>
-    <p id="ev-current-help" class="muted">{% if amps is none %}{{ state.charging_policy | title }} stays active until you set a current. {% endif %}Release the slider to apply. 0 A pauses charging. OpenEVSE limits apply.</p>
+    <p id="ev-current-help" class="muted">
+        {% if manual_open and charger_amps is none %}
+        Could not read the current from OpenEVSE.{% if amps is not none %} Showing the last saved setting.{% endif %}
+        {% endif %}
+        {% if state.ev_manual_amps is none %}{{ state.charging_policy | title }} stays active until you set a current. {% endif %}
+        Release the slider to apply. 0 A pauses charging. OpenEVSE limits apply.
+    </p>
     {% endif %}
 </div>

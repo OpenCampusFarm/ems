@@ -76,7 +76,7 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             "Set PORTAL_PASSWORD and a random PORTAL_SECRET_KEY of at least 32 characters in portal/.env"
         )
     if not demo:
-        from Loads.openevse import set_charging
+        from Loads.openevse import get_requested_current, set_charging
 
     app.config.update(
         SECRET_KEY=secret_key,
@@ -168,11 +168,20 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             log.exception("[Portal] Unable to read controller settings")
             state = None
             error = "Controller settings are unavailable. Check system.db."
+        charger_amps = None
+        if manual_open and state and state["ems"] == "on" and not error:
+            if demo:
+                saved_amps = state["ev_manual_amps"]
+                charger_amps = 20 if saved_amps is None else saved_amps
+            else:
+                charger_amps = get_requested_current()
+                if charger_amps and not EV_MIN_A <= charger_amps <= EV_MAX_A:
+                    charger_amps = None
         return render_template("ev_current.html" if current_only else "controls.html",
                                state=state, modes=MODES, demo=demo, manual_open=manual_open,
                                fan_status=fan_auto_status() if not current_only and state and state["fan"] == "auto" else None,
                                coolbot_min=COOLBOT_MIN_F, coolbot_max=COOLBOT_MAX_F,
-                               ev_min=EV_MIN_A, ev_max=EV_MAX_A,
+                               ev_min=EV_MIN_A, ev_max=EV_MAX_A, charger_amps=charger_amps,
                                csrf=csrf_token(), message=message, error=None if current_only else error,
                                current_error=error if current_only else None)
 

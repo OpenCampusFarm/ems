@@ -21,7 +21,7 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-from ev_current_policy import claim_body
+from ev_current_policy import MIN_CURRENT_AMPS, claim_body
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -44,13 +44,38 @@ STATE_SLEEPING = 254
 STATE_DISABLED = 255
 
 
-def _request(method: str, path: str, **kwargs) -> requests.Response:
+def _request(method: str, path: str, *, timeout=TIMEOUT, **kwargs) -> requests.Response:
     auth = (OPENEVSE_USER, OPENEVSE_PASSWORD) if OPENEVSE_USER else None
     resp = requests.request(
-        method, f"{OPENEVSE_URI}{path}", auth=auth, timeout=TIMEOUT, **kwargs
+        method, f"{OPENEVSE_URI}{path}", auth=auth, timeout=timeout, **kwargs
     )
     resp.raise_for_status()
     return resp
+
+
+def get_requested_current() -> int | None:
+    """Read the EMS claim or the charger's pilot current when no rate is claimed."""
+    try:
+        try:
+            claim = _request("GET", f"/claims/{OPENEVSE_CLAIM_ID}", timeout=3).json()
+        except requests.HTTPError as error:
+            if error.response is None or error.response.status_code != 404:
+                raise
+            claim = None
+
+        if isinstance(claim, dict):
+            if claim.get("state") == "disabled":
+                return 0
+            amps = claim.get("charge_current")
+            if type(amps) is int and amps >= MIN_CURRENT_AMPS:
+                return amps
+
+        status = _request("GET", "/status", timeout=3).json()
+        pilot = status.get("pilot") if isinstance(status, dict) else None
+        return pilot if type(pilot) is int and pilot >= MIN_CURRENT_AMPS else None
+    except requests.RequestException as error:
+        log.warning("[EV] Unable to read requested current: %s", error)
+        return None
 
 
 def get_status() -> dict | None:
