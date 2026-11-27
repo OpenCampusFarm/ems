@@ -6,6 +6,7 @@
     <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"historyCacheSize":0,"timeout":140000}'>
     <link rel="icon" href="{{ url_for('static', filename='farm.png') }}">
     <title>{% block title %}Farm Energy Portal{% endblock %}</title>
+    <script src="{{ url_for('static', filename='theme.js') }}"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='portal.css') }}">
     <script src="{{ url_for('static', filename='htmx.min.js') }}" defer></script>
     <script src="{{ url_for('static', filename='portal.js') }}" defer></script>
@@ -14,7 +15,17 @@
     <header class="topbar">
         <div class="shell topbar-inner">
             <div class="brand"><span class="brand-mark" aria-hidden="true">ϟ</span> Campus Farm <span class="brand-detail">/ Energy</span></div>
-            {% block header %}{% endblock %}
+            <div class="topbar-actions">
+                <label id="theme-picker" hidden>
+                    <span class="sr-only">Theme</span>
+                    <select id="portal-theme">
+                        <option value="auto">Auto</option>
+                        <option value="light">Light</option>
+                        <option value="dark">Dark</option>
+                    </select>
+                </label>
+                {% block header %}{% endblock %}
+            </div>
         </div>
     </header>
     {% block body %}{% endblock %}
