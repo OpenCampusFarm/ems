@@ -11,27 +11,46 @@
     <div class="metrics">
         <div class="panel metric ev">
             <span>OpenEVSE charge current</span>
-            <strong>{{ '%.1f' | format(latest.ev_current_a) if numeric(latest.get('ev_current_a')) else '—' }} <small>A</small></strong>
-            {% if numeric(latest.get('ev')) %}<span>{{ '%.0f' | format(latest.ev) }} W</span>{% endif %}
+            {% if numeric(latest.get('ev')) %}<span class="metric-detail">{{ '%.0f' | format(latest.ev) }} W</span>{% endif %}
+            <div class="metric-reading">
+                <strong>{{ '%.1f' | format(latest.ev_current_a) if numeric(latest.get('ev_current_a')) else '—' }}</strong>
+                <small>A</small>
+            </div>
         </div>
         <div class="panel metric watttime">
             <span>WattTime MOER</span>
             {% if numeric(latest.get('moer')) %}
-            <strong>{{ '{:,.0f}'.format(latest.moer) }}</strong>
-            <span>lb CO₂/MWh</span>
-            <span class="metric-time">{{ last_sample }} ET{% if stale %} · Stale{% endif %}</span>
+            <span class="metric-detail">{{ last_sample }} ET{% if stale %} · Stale{% endif %}</span>
             {% else %}
-            <strong>—</strong>
-            <span>No WattTime reading</span>
+            <span class="metric-detail">No WattTime reading</span>
             {% endif %}
+            <div class="metric-reading">
+                <strong>{{ '{:,.0f}'.format(latest.moer) if numeric(latest.get('moer')) else '—' }}</strong>
+                <small>lb&nbsp;CO₂<wbr>/MWh</small>
+            </div>
         </div>
         {% for key, label in series.items() if key != 'ev' %}
-        <div class="panel metric {{ key }}"><span>{{ label }}</span><strong>{{ '%.2f' | format(latest[key] / 1000) if numeric(latest.get(key)) else '—' }} <small>kW</small></strong></div>
+        <div class="panel metric {{ key }}">
+            <span>{{ label }}</span>
+            <div class="metric-reading">
+                <strong>{{ '%.2f' | format(latest[key] / 1000) if numeric(latest.get(key)) else '—' }}</strong>
+                <small>kW</small>
+            </div>
+        </div>
         {% endfor %}
-        <div class="panel metric room"><span>Cool room temperature</span><strong>{{ '%.1f' | format(latest.room) if numeric(latest.get('room')) else '—' }} <small>°F</small></strong></div>
+        <div class="panel metric room">
+            <span>Cool room temperature</span>
+            <div class="metric-reading">
+                <strong>{{ '%.1f' | format(latest.room) if numeric(latest.get('room')) else '—' }}</strong>
+                <small>°F</small>
+            </div>
+        </div>
         <div class="panel metric setpoint">
             <span>CoolBot setpoint</span>
-            <strong>{{ '%g' | format(latest.coolbot_setpoint_f) if numeric(latest.get('coolbot_setpoint_f')) else '—' }} <small>°F</small></strong>
+            <div class="metric-reading">
+                <strong>{{ '%g' | format(latest.coolbot_setpoint_f) if numeric(latest.get('coolbot_setpoint_f')) else '—' }}</strong>
+                <small>°F</small>
+            </div>
         </div>
     </div>
     <section class="panel chart">
