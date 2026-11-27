@@ -26,6 +26,7 @@ from system_state import DATABASE, MODES, mark_applied, read_state, save_mode
 from telemetry_store import LEGACY_TELEMETRY, TELEMETRY_DB, numeric, read_carbon, read_dashboard
 
 log = logging.getLogger(__name__)
+CONTROL_LABELS = {"fan": "Fan mode", "ems": "EMS mode", "charging_policy": "Charging policy"}
 
 
 def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *, legacy=LEGACY_TELEMETRY):
@@ -143,7 +144,8 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *, legacy=
         if target not in MODES or mode not in MODES[target]:
             abort(400)
         verify_csrf()
-        label = "Fan" if target == "fan" else "EMS"
+        label = CONTROL_LABELS[target]
+        display_mode = mode.title()
 
         def result(message=None, error=None):
             cards = controller_cards(message, error)
@@ -156,21 +158,30 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *, legacy=
             with database.with_name(database.name + ".lock").open("a") as lock_file:
                 fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 if not save_mode(target, mode, database):
-                    return result(message=f"{label} is already set to {mode}.")
+                    return result(message=f"{label} is already set to {display_mode}.")
                 try:
-                    if not demo:
-                        apply_mode(target, mode)
+                    process_target, process_mode = target, mode
+                    if target == "charging_policy":
+                        process_target, process_mode = "ems", read_state(database)["ems"]
+                    saved_for_later = target == "charging_policy" and process_mode == "off"
+                    if not demo and not saved_for_later:
+                        apply_mode(process_target, process_mode)
+                    if target == "ems" and mode == "on":
+                        mark_applied("charging_policy", database)
                     mark_applied(target, database)
-                except (OSError, HTTPException, RPCError, sqlite3.Error):
-                    log.exception("[Portal] Unable to apply %s mode %s", label, mode)
-                    return result(error=f"{label} mode was saved. The process change could not be confirmed. Retry to apply it.")
+                except (OSError, ValueError, HTTPException, RPCError, sqlite3.Error):
+                    log.exception("[Portal] Unable to apply %s %s", label, mode)
+                    return result(error=f"{label} was saved. The process change could not be confirmed. Retry to apply it.")
         except BlockingIOError:
             return result(error="A mode change is in progress. Try again shortly.")
         except (OSError, sqlite3.Error):
-            log.exception("[Portal] Unable to save %s mode %s", label, mode)
-            return result(error=f"Could not save {label} mode.")
-        log.info("[Portal] %s mode applied: %s", label, mode)
-        return result(message=f"{label} mode applied: {mode}.")
+            log.exception("[Portal] Unable to save %s %s", label, mode)
+            return result(error=f"Could not save {label.lower()}.")
+        if saved_for_later:
+            log.info("[Portal] Charging policy saved while EMS is off: %s", mode)
+            return result(message=f"{label} saved as {display_mode}. It will be used when EMS is on.")
+        log.info("[Portal] %s applied: %s", label, mode)
+        return result(message=f"{label} applied: {display_mode}.")
 
     @app.get("/monitoring")
     def monitoring():

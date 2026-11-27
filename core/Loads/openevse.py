@@ -7,6 +7,7 @@ than the manual override (priority 1000) used by the charger's LCD / web UI, so
 a person at the charger can always override the EMS.
 
   POST   /claims/<client_id>   {"state": "active" | "disabled", "auto_release": true}
+                              Active claims can also specify "charge_current" in amps.
   DELETE /claims/<client_id>   release the claim
 """
 
@@ -17,6 +18,8 @@ from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
+
+from ev_current_policy import claim_body
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -80,9 +83,9 @@ def get_status() -> dict | None:
         return None
 
 
-def set_charging(enabled: bool) -> dict:
-    """Allow (active) or block (disabled) charging via an EVSE claim."""
-    body = {"state": "active" if enabled else "disabled", "auto_release": True}
+def set_charging(enabled: bool, amps: int | None = None) -> dict:
+    """Allow charging at the requested current, or block it via an EVSE claim."""
+    body = claim_body(enabled, amps)
     return _request("POST", f"/claims/{OPENEVSE_CLAIM_ID}", json=body).json()
 
 

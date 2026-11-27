@@ -23,17 +23,15 @@ Every `POLL_INTERVAL` seconds (default 300s):
 
 1. Read SolArk inverter — PV watts, grid watts
 2. Read WattTime — grid carbon intensity (MOER, lbs CO₂/MWh)
-3. Determine if energy is **clean**: PV ≥ 500W **or** MOER < 1400 lbs CO₂/MWh
-4. Apply decision:
+3. Set CoolBot to 45°F if PV is at least 500 W or MOER is below 1400 lbs CO₂/MWh. Otherwise use 50°F.
+4. Estimate surplus solar by subtracting the non-EV load from SolArk's PV output. Apply the saved EV charging policy.
 
 (Each cycle also logs eGauge grid / CoolBot / EV power for monitoring; it does not affect the decision.)
 
-| Condition | CoolBot setpoint | EV charging          |
-| --------- | ---------------- | -------------------- |
-| Clean     | 45°F             | ON                   |
-| Dirty     | 50°F             | OFF                  |
+- **Staged (default)** requests the highest of 6, 20, 34, or 48 A that estimated surplus solar covers at 240 V. It pauses below 1.44 kW of estimated surplus.
+- **Binary** requests 12 A when estimated surplus is at least 2.88 kW and pauses below that threshold.
 
-EV charging is switched with an **EVSE claim** (`POST /claims/<id>`, state `active`/`disabled`, API priority 500), not the manual override, so the charger's LCD / manual override (priority 1000) can still take control. Vehicle SOC is not used; the car ends the charge itself when full.
+Both policies use an OpenEVSE claim (`POST /claims/<id>`). The charger applies its configured limits and the vehicle can draw less than the requested current. Actual grid imports can vary with meter timing and changes in load between polls. The charger’s manual override can take precedence. The car ends the charge itself when full.
 
 ## Setup
 

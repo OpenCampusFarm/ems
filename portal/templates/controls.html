@@ -4,11 +4,15 @@
 <div class="control-grid">
     {% for target, title, description in (
         ('fan', 'Ventilation fan', 'Auto uses outdoor temperature and CoolBot readings.'),
-        ('ems', 'EMS automation', 'Off stops automatic CoolBot setpoint changes and returns charging control to OpenEVSE. CoolBot keeps its current setpoint.'))
+        ('ems', 'EMS automation', 'Off stops automatic CoolBot setpoint changes and returns charging control to OpenEVSE. CoolBot keeps its current setpoint.'),
+        ('charging_policy', 'EV charging policy', 'Binary requests 12 A. Staged selects from 6, 20, 34, and 48 A. Both pause when estimated surplus solar is too low.'))
     %}
-    <section class="panel control-panel" aria-labelledby="{{ target }}-title">
+    <section class="panel control-panel{% if target == 'charging_policy' %} policy-panel{% endif %}" aria-labelledby="{{ target }}-title">
         <div class="panel-heading"><h3 id="{{ target }}-title">{{ title }}</h3><span class="badge">Requested · {{ state[target] | title }}</span></div>
         <p class="muted">{{ description }}</p>
+        {% if target == 'charging_policy' and state.ems == 'off' %}
+        <p class="muted">This setting takes effect when EMS automation is on.</p>
+        {% endif %}
         <form method="post" action="{{ url_for('set_mode', target=target) }}"
               hx-post="{{ url_for('set_mode', target=target) }}" hx-target="#controller-cards"
               hx-swap="innerHTML" hx-disabled-elt="find fieldset" hx-sync="#controller-cards:drop">

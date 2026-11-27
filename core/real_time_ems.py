@@ -5,8 +5,10 @@ Decision logic (every POLL_INTERVAL seconds):
   1. Read SolArk inverter: PV watts, grid watts
   2. Read WattTime grid MOER (lbs CO2/MWh)
   3. "Clean" if PV is producing (>= PV_MIN_WATTS) OR grid MOER < CO2_CLEAN_THRESHOLD
-  4. If clean  → CoolBot setpoint = SETPOINT_COOLTH, allow EV charging
-     If dirty  → CoolBot setpoint = SETPOINT_ECON,   block EV charging
+  4. If clean  → CoolBot setpoint = SETPOINT_COOLTH
+     If dirty  → CoolBot setpoint = SETPOINT_ECON
+  5. Use the charging policy selected in system.db to set the EV current
+     that estimated surplus solar can cover.
   EV charging is controlled on the OpenEVSE charger via an EVSE claim (soft control),
   so the charger's LCD manual override still wins.
 """
@@ -32,6 +34,7 @@ from Loads.coolbot import change_setpoint, get_room_temp
 from Loads.openevse import get_status as get_ev_status
 from Loads.openevse import release_claim, set_charging
 from egauge_client import EGaugeClient
+from ev_current_policy import choose_ev_amps, excess_pv_watts
 from solArk_inverter import get_inverter_data
 
 load_dotenv(Path(__file__).parent / ".env")
@@ -179,7 +182,7 @@ def get_egauge_data() -> dict | None:
 _current_setpoint: int = SETPOINT_DEFAULT
 
 
-def run_ems_cycle() -> None:
+def run_ems_cycle(policy: str) -> None:
     global _current_setpoint
 
     power = get_power_data()
@@ -223,7 +226,7 @@ def run_ems_cycle() -> None:
             ev_data["power_w"],
         )
 
-    publish(power, egauge, ev_data, room_temp, moer, "binary")
+    publish(power, egauge, ev_data, room_temp, moer, policy)
 
     pv_producing = pv_w >= PV_MIN_WATTS
     grid_clean = moer is not None and moer < CO2_CLEAN_THRESHOLD
@@ -257,14 +260,13 @@ def run_ems_cycle() -> None:
         log.info("[EV] OpenEVSE unavailable — skipping charging decision")
         return
 
+    surplus_w = excess_pv_watts(pv_w, load_w, ev_data["power_w"])
+    amps = choose_ev_amps(surplus_w, policy)
     try:
-        set_charging(energy_clean)
-        if energy_clean:
-            log.info("[EV] Charging allowed (claim active)")
-        else:
-            log.info("[EV] Charging blocked (claim disabled: dirty energy)")
+        set_charging(amps > 0, amps)
+        log.info("[EV] %s requested %d A (estimated surplus solar %.0f W)", policy, amps, surplus_w)
     except Exception as exc:
-        log.error("[EV] set_charging(%s) failed: %s", energy_clean, exc)
+        log.error("[EV] %s request for %d A failed: %s", policy, amps, exc)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -304,7 +306,8 @@ def shutdown() -> None:
 
 
 def main() -> None:
-    if read_state()["ems"] == "off":
+    state = read_state()
+    if state["ems"] == "off":
         log.info("[EMS] Disabled by system.db")
         # Give supervisord time to register the process before a clean exit.
         time.sleep(2)
@@ -315,11 +318,12 @@ def main() -> None:
         if sig is not None:
             signal.signal(sig, _handle_signal)
     log.info("[EMS] Starting up...")
-    log.info("Campus Farm EMS starting — poll every %ds", POLL_INTERVAL)
+    policy = state["charging_policy"]
+    log.info("Campus Farm EMS starting — %s charging, poll every %ds", policy, POLL_INTERVAL)
     try:
         while not _stop.is_set():
             try:
-                run_ems_cycle()
+                run_ems_cycle(policy)
             except KeyboardInterrupt:
                 break
             except Exception as exc:

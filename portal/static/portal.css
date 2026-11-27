@@ -81,6 +81,8 @@ h3 { font-size: 1.08rem; }
 .empty { min-height: 190px; display: grid; place-content: center; gap: 6px; text-align: center; color: var(--muted); }
 .section-title { margin: 22px 0 9px; }
 .control-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.policy-panel { grid-column: 1 / -1; }
+.policy-panel .segments { max-width: 450px; }
 fieldset { min-width: 0; margin: 14px 0 0; border: none; padding: 0; }
 .segments { display: flex; gap: 4px; padding: 4px; border: 1px solid var(--border); border-radius: 9px; background: #edf3f4; }
 .segments button { flex: 1; min-height: 44px; border: none; border-radius: 6px; font-weight: 650; background: transparent; color: var(--ink); }
