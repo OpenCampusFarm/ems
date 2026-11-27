@@ -39,7 +39,8 @@ from watttime_client import get_grid_moer
 from solArk_inverter import fetch_plant_data
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from telemetry_store import record_carbon
+from fan_runtime import read_auto_fan_reading
+from telemetry_store import numeric, record_carbon
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -61,6 +62,8 @@ PUBLISH_CARBON = (os.getenv("PUBLISH_CARBON") or "1") == "1"
 CARBON_PUBLISH_MINUTES = int(os.getenv("CARBON_PUBLISH_MINUTES", "5"))   # one carbon row per this many minutes
 CARBON_MAX_PENDING_MINUTES = 60   # /api/cf/carbon accepts up to 60 minutes per row
 CARBON_START_EV_SOC_PERCENT = float(os.getenv("CARBON_START_EV_SOC_PERCENT") or "80")   # fresh start only
+CARBON_FAN_POWER_W = float(os.getenv("CARBON_FAN_POWER_W") or "124")  # four fans at an assumed 31 W each
+FAN_READING_MAX_AGE_SECONDS = 90
 
 MOER_REFRESH_SECONDS = 300        # WattTime publishes MOER every 5 minutes
 MOER_MAX_AGE_SECONDS = 1800       # older than this = no MOER, carbon waits
@@ -172,6 +175,23 @@ class CarbonPublisher:
         if ev_status is not None:
             self.ev_plugged = ev_status["connected"]
 
+    def _fan_avoided_lb(self, now: float, net_grid_kw: float, minutes: int) -> float | None:
+        reading = read_auto_fan_reading()
+        if reading is None:
+            return None
+        stamp = reading.get("ts")
+        if not numeric(stamp) or not 0 <= now - stamp <= FAN_READING_MAX_AGE_SECONDS:
+            return None
+        if not reading["on"]:
+            return 0.0
+        room_f, outdoor_f = reading.get("room_f"), reading.get("outdoor_f")
+        if not numeric(room_f) or not numeric(outdoor_f):
+            return None
+        return self.tracker.estimate_fan_avoided_lb(
+            room_f, outdoor_f, CARBON_FAN_POWER_W / 1000.0,
+            net_grid_kw, self.moer_lb_per_mwh, minutes,
+        )
+
     def cycle(self, flow: dict, minutes: int) -> None:
         """Add one reading covering `minutes`, and POST when CARBON_PUBLISH_MINUTES have built up."""
         self._refresh_inputs()
@@ -193,7 +213,8 @@ class CarbonPublisher:
                 log.info("[Carbon] Fresh start: truck %.0f%%, battery %.0f%% (Sol-Ark)",
                          CARBON_START_EV_SOC_PERCENT, flow["soc"])
 
-        grid_buy_kw = max(0.0, -signed_grid_watts(flow)) / 1000.0
+        net_grid_kw = -signed_grid_watts(flow) / 1000.0
+        grid_buy_kw = max(0.0, net_grid_kw)
         timestamp = pd.Timestamp.now(tz="America/Detroit")
         result = self.tracker.update(
             timestamp, minutes,
@@ -206,7 +227,8 @@ class CarbonPublisher:
         self.tracker.save_state()
         try:
             record_carbon(((timestamp.timestamp(), minutes,
-                            float(result["without_ems_co2_lb"]), float(result["with_ems_co2_lb"])),))
+                            float(result["without_ems_co2_lb"]), float(result["with_ems_co2_lb"]),
+                            self._fan_avoided_lb(timestamp.timestamp(), net_grid_kw, minutes)),))
         except (OSError, sqlite3.Error) as exc:
             log.warning("[Carbon] Could not save Portal telemetry: %s", exc)
 

@@ -62,11 +62,14 @@ def setup_gpio():
     GPIO.setup(RELAY_PIN, GPIO.OUT, initial=GPIO.LOW)
 
 
-def set_fan(mode: FanMode, on: bool):
+def set_fan(on: bool):
     GPIO.output(RELAY_PIN, GPIO.HIGH if on else GPIO.LOW)
     log.info("[Fan] %s", "ON" if on else "OFF")
+
+
+def publish_fan_status(mode: FanMode, on: bool, *, room_f=None, outdoor_f=None):
     try:
-        record_fan_status(mode.value, on)
+        record_fan_status(mode.value, on, room_f=room_f, outdoor_f=outdoor_f)
     except OSError as error:
         log.warning("[Fan] Could not report relay status: %s", error)
 
@@ -76,12 +79,15 @@ def set_fan(mode: FanMode, on: bool):
 
 async def control_loop(mode: FanMode):
     if mode is not FanMode.AUTO:
-        set_fan(mode, mode is FanMode.FORCE_ON)
+        fan_on = mode is FanMode.FORCE_ON
+        set_fan(fan_on)
+        publish_fan_status(mode, fan_on)
         await asyncio.Event().wait()
         return
 
     fan_on = False
     while True:
+        room = outdoor = None
         try:
             async with CoolBotClient() as cb:
                 outdoor = get_outdoor_temp()
@@ -91,7 +97,7 @@ async def control_loop(mode: FanMode):
                 if not cb.is_running:
                     log.warning("[CoolBot] Offline or off — fan OFF")
                     fan_on = False
-                    set_fan(mode, False)
+                    set_fan(False)
                 elif None in (outdoor, room, setpoint):
                     log.warning(
                         "[Fan] Missing data (outdoor=%s, room=%s, setpoint=%s) — fan OFF",
@@ -100,7 +106,7 @@ async def control_loop(mode: FanMode):
                         setpoint,
                     )
                     fan_on = False
-                    set_fan(mode, False)
+                    set_fan(False)
                 elif not fan_on and (
                     room >= setpoint - START_BELOW_SETPOINT_F
                     and room - outdoor >= START_OUTDOOR_DIFFERENCE_F
@@ -112,7 +118,7 @@ async def control_loop(mode: FanMode):
                         setpoint,
                         room,
                     )
-                    set_fan(mode, True)
+                    set_fan(True)
                 elif fan_on and (
                     room <= setpoint - STOP_BELOW_SETPOINT_F
                     or room - outdoor <= STOP_OUTDOOR_DIFFERENCE_F
@@ -124,7 +130,7 @@ async def control_loop(mode: FanMode):
                         setpoint,
                         room,
                     )
-                    set_fan(mode, False)
+                    set_fan(False)
                 else:
                     log.info(
                         "[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F — fan %s (no change)",
@@ -137,8 +143,9 @@ async def control_loop(mode: FanMode):
         except Exception as e:
             log.error("[Fan] Control loop error: %s — fan OFF", e, exc_info=True)
             fan_on = False
-            set_fan(mode, False)
+            set_fan(False)
 
+        publish_fan_status(mode, fan_on, room_f=room, outdoor_f=outdoor)
         await asyncio.sleep(POLL_INTERVAL)
 
 
@@ -172,11 +179,13 @@ def main():
     setup_gpio()
     try:
         if mode is FanMode.AUTO:
-            set_fan(mode, False)
+            set_fan(False)
+            publish_fan_status(mode, False)
         asyncio.run(run(mode))
     finally:
         log.info("[Fan] Shutting down — fan OFF, releasing GPIO")
-        set_fan(mode, False)
+        set_fan(False)
+        publish_fan_status(mode, False)
         GPIO.cleanup()
 
 

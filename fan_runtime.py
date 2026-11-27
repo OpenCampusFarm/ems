@@ -2,27 +2,37 @@
 
 import json
 import os
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 STATUS_PATH = Path("/run/campus-ems/fan-status.json")
 
 
-def record_fan_status(mode, on, path=STATUS_PATH):
+def record_fan_status(mode, on, path=STATUS_PATH, *, room_f=None, outdoor_f=None):
     with TemporaryDirectory(prefix=".fan-status-", dir=path.parent) as directory:
         temporary = Path(directory) / path.name
-        temporary.write_text(json.dumps({"pid": os.getpid(), "mode": mode, "on": on}))
+        temporary.write_text(json.dumps({
+            "pid": os.getpid(), "mode": mode, "on": on, "ts": time.time(),
+            "room_f": room_f, "outdoor_f": outdoor_f,
+        }))
         # The root-run fan publishes to the group-traversable runtime directory.
         temporary.chmod(0o644)
         temporary.replace(path)
 
 
-def read_auto_fan_status(pid, path=STATUS_PATH):
+def read_auto_fan_reading(path=STATUS_PATH):
     try:
         reading = json.loads(path.read_text())
     except (OSError, ValueError):
         return None
-    if (isinstance(reading, dict) and reading.get("pid") == pid
-            and reading.get("mode") == "auto" and isinstance(reading.get("on"), bool)):
+    if isinstance(reading, dict) and reading.get("mode") == "auto" and isinstance(reading.get("on"), bool):
+        return reading
+    return None
+
+
+def read_auto_fan_status(pid, path=STATUS_PATH):
+    reading = read_auto_fan_reading(path)
+    if reading and reading.get("pid") == pid:
         return reading["on"]
     return None

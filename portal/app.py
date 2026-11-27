@@ -281,6 +281,7 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
         except (OSError, sqlite3.Error):
             log.exception("[Portal] Could not read carbon estimates")
             carbon_rows = []
+        fan_totals = [row["fan_avoided_kg"] for row in carbon_rows if numeric(row["fan_avoided_kg"])]
         diagnostics_time = None
         diagnostics = {}
         try:
@@ -337,6 +338,7 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             egauge=build_chart(meter_rows[ranges["egauge"]], now, chart_periods["egauge"], EGAUGE_VIEW),
             egauge_view=EGAUGE_VIEW, egauge_details=egauge_details,
             carbon=build_chart(carbon_rows, now, chart_periods["carbon"], CARBON_VIEW), carbon_view=CARBON_VIEW,
+            fan_total_kg=sum(fan_totals) if fan_totals else None,
             selected_view=selected_view, selected_metric=chosen, diagnostics=diagnostics,
             solark_power_series=SOLARK_VIEWS["power"].series,
             fields=fields, measurable=measurable, solark_status=status,

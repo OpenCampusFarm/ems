@@ -10,6 +10,8 @@ Flask and HTMX console for monitoring and controlling the Campus Farm EMS.
 
 Settings live in `system.db`. The defaults are Fan Auto, EMS On, and Staged charging. Charts read up to 3,650 days of history from `telemetry.db`.
 
+The CO₂ chart includes a ventilation estimate for recorded Auto operation. It uses the cooler model's airflow and AC efficiency, four fans at an assumed 31 W each, and WattTime. Set `CARBON_FAN_POWER_W` in `core/.env` to use measured combined power. The whole-farm estimate already reflects ventilation and AC use.
+
 ## Setup
 
 From `portal/`, create the operator configuration.

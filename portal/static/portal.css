@@ -68,6 +68,7 @@ h3 { font-size: 1.08rem; }
 .grid_l1_w { --accent: #5f649b; }
 .grid_l2_w { --accent: #327999; }
 .avoided { --accent: var(--carbon); }
+.fan_avoided { --accent: var(--teal); }
 .chart, .control-panel { padding: 16px; min-width: 0; }
 .panel-heading, .chart-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 7px 14px; }
 .chart .muted { font-size: .875rem; }
@@ -84,7 +85,7 @@ h3 { font-size: 1.08rem; }
 .carbon-chart .plot line.zero { stroke: var(--carbon); stroke-dasharray: 1 4; opacity: .65; }
 .plot polyline { fill: none; stroke: var(--accent); stroke-width: 2.3px; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
 .plot polyline.grid, .plot polyline.egauge_grid_w, .plot polyline.solark_grid_w { stroke-dasharray: 5 3; }
-.plot polyline.grid_l1_w { stroke-dasharray: 9 4; }
+.plot polyline.grid_l1_w, .plot polyline.fan_avoided { stroke-dasharray: 9 4; }
 .plot polyline.grid_l2_w { stroke-dasharray: 2 3; }
 .plot circle { fill: var(--accent); }
 .plot text { fill: var(--muted); font-family: inherit; font-size: 12px; }
@@ -92,7 +93,7 @@ h3 { font-size: 1.08rem; }
 .chart-footer { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 15px; padding: 0; margin: 0; list-style: none; font-size: .875rem; }
 .legend li::before { content: ""; display: inline-block; width: 16px; border-top: 3px solid var(--accent); margin-inline-end: 6px; vertical-align: middle; }
-.legend li.grid::before, .legend li.egauge_grid_w::before, .legend li.solark_grid_w::before, .legend li.grid_l1_w::before { border-top-style: dashed; }
+.legend li.grid::before, .legend li.egauge_grid_w::before, .legend li.solark_grid_w::before, .legend li.grid_l1_w::before, .legend li.fan_avoided::before { border-top-style: dashed; }
 .legend li.grid_l2_w::before { border-top-style: dotted; }
 .carbon-caption { margin-top: 8px; }
 .diagnostic-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }

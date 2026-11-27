@@ -194,9 +194,22 @@
         {{ range_picker('carbon', 'Estimated CO₂ avoided') }}
         {% if carbon.available %}
         {{ plot(carbon, carbon_view, 'carbon-chart-viewport') }}
+        <div class="chart-footer">
+            <ul class="legend">
+                {% for key, label in carbon_view.series.items() if carbon.paths[key] %}<li class="{{ key }}">{{ label }}</li>{% endfor %}
+            </ul>
+            {% if fan_total_kg is not none %}
+            <span class="muted">Recorded Auto fan savings <strong>{{ '{:,.2f}'.format(fan_total_kg) }} kg CO₂</strong></span>
+            {% endif %}
+        </div>
         {% else %}
         <div class="empty"><strong>No CO₂ savings estimate for this time range</strong></div>
         {% endif %}
-        <p class="carbon-caption muted">Compares modeled grid emissions without EMS to measured grid emissions. Positive means lower measured emissions, zero means equal, and negative means higher measured emissions.</p>
+        <p class="carbon-caption muted"><strong>Whole farm</strong> compares modeled grid emissions without EMS to measured grid emissions.</p>
+        <p class="carbon-caption muted"><strong>Ventilation fans</strong> compares four fans in Auto with the AC providing the same cooling. The whole-farm estimate already reflects measured ventilation and AC use.</p>
+        <p class="carbon-caption muted">Positive values mean lower emissions, zero means no change, and negative values mean higher emissions.</p>
+        {% if fan_total_kg is none %}
+        <p class="carbon-caption muted">No Auto fan estimates recorded in this range.</p>
+        {% endif %}
     </section>
 </div>

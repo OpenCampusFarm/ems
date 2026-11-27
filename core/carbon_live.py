@@ -173,6 +173,16 @@ class CarbonTracker:
             **totals,
         }
 
+    def estimate_fan_avoided_lb(self, room_f: float, outdoor_f: float, fan_kw: float,
+                                net_grid_kw: float, moer: float, minutes: int) -> float:
+        """Estimate grid emissions saved by supplying the same cooling with outdoor air."""
+        ventilation_kw = self.cooler.fan.h * max(0.0, room_f - outdoor_f)
+        ac_kw = min(ventilation_kw, self.cooler.fan.sensible_kw) / self.cooler.cop
+        # Hold PV, battery dispatch and other loads fixed. Grid export earns no credit.
+        without_fans = max(0.0, net_grid_kw + ac_kw - fan_kw)
+        extra_grid_kw = without_fans - max(0.0, net_grid_kw)
+        return co2_lb(extra_grid_kw, moer, minutes)
+
     # keep the shadow farm's state across restarts
     def to_state(self) -> dict:
         return {

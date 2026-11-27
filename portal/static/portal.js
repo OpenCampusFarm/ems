@@ -79,7 +79,7 @@ function setupChart(viewport) {
             const value = document.createElement("dd");
             value.textContent = present ? `${item.value.toLocaleString("en-US", {
                 maximumFractionDigits: precision,
-                minimumFractionDigits: key === "avoided" ? 2 : 0,
+                minimumFractionDigits: unit === "kg/h" ? 2 : 0,
             })} ${unit}` : "—";
             if (present && Math.floor(item.ts / 60) !== Math.floor(point.ts / 60)) {
                 const time = document.createElement("time");

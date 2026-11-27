@@ -69,7 +69,8 @@ def write_samples(path):
     record_samples((_sample(now - offset) for offset in chain(older, recent)),
                    path, legacy=None, now=now, egauge_snapshots=snapshots)
     record_carbon(
-        ((now - offset, 5, 0.08 + 0.04 * math.sin(offset / 7900), 0.05)
+        ((now - offset, 5, 0.08 + 0.04 * math.sin(offset / 7900), 0.05,
+          0.015 * max(0, math.sin(offset / 7900)) if offset <= DAY else None)
          for offset in chain(older, recent)),
         path, legacy=None, now=now,
     )
