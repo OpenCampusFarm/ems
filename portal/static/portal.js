@@ -126,16 +126,18 @@ function setupCharts() {
 }
 
 setupCharts();
-let inverterDetailsOpen = false;
+let openDiagnosticLists = [];
 document.body.addEventListener("htmx:beforeSwap", ({ detail }) => {
     if (detail.target.id === "monitoring") {
-        inverterDetailsOpen = document.getElementById("solark-diagnostics")?.open ?? false;
+        openDiagnosticLists = Array.from(detail.target.querySelectorAll(".diagnostics-list[open]"), list => list.id);
     }
 });
 document.body.addEventListener("htmx:afterSwap", ({ detail }) => {
     if (detail.target.id === "monitoring") {
-        const details = document.getElementById("solark-diagnostics");
-        if (details) details.open = inverterDetailsOpen;
+        for (const id of openDiagnosticLists) {
+            const details = document.getElementById(id);
+            if (details) details.open = true;
+        }
     }
     setupCharts();
 });

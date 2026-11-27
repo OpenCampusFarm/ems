@@ -49,7 +49,20 @@ def write_samples(path):
     now = time.time()
     older = range(366 * DAY, DAY, -3600)
     recent = range(DAY, -1, -300)
-    record_samples((_sample(now - offset) for offset in chain(older, recent)), path, legacy=None, now=now)
+    latest = _sample(now)
+    snapshots = (
+        ("registers", now, [
+            {"name": "Grid", "value": latest["grid"], "unit": "W"},
+            {"name": "L1 Voltage", "value": latest["l1_v"], "unit": "V"},
+            {"name": "Internal Humidity", "value": latest["meter_humidity"], "unit": "%"},
+        ]),
+        ("channels", now, [
+            {"name": "L1 · Frequency", "value": latest["grid_hz"], "unit": "Hz"},
+            {"name": "S1 · Normal", "value": latest["grid_l1_a"], "unit": "A"},
+        ]),
+    )
+    record_samples((_sample(now - offset) for offset in chain(older, recent)),
+                   path, legacy=None, now=now, egauge_snapshots=snapshots)
     record_carbon(
         ((now - offset, 5, 0.08 + 0.04 * math.sin(offset / 7900), 0.05)
          for offset in chain(older, recent)),

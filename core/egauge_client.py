@@ -1,6 +1,7 @@
 import hashlib
 import os
 from datetime import datetime, timedelta
+from math import isfinite
 from pathlib import Path
 from secrets import token_hex
 
@@ -10,6 +11,20 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 
 TIMEOUT = 10  # seconds
+RATE_UNITS = {
+    "%": "%", "a": "°", "Ee": "W/m²", "F": "Hz", "h": "%", "I": "A",
+    "m": "g", "P": "W", "Pa": "Pa", "ppm": "ppm", "var": "var",
+    "Q": "g/s", "Qe": "Ah", "Qv": "m³/s", "R": "Ω", "S": "VA",
+    "T": "°C", "THD": "%", "V": "V", "v": "m/s",
+}
+
+
+def _meter_reading(name, value, unit):
+    return {
+        "name": name,
+        "value": value if type(value) in (int, float) and isfinite(value) else None,
+        "unit": unit,
+    }
 
 
 class EGaugeClient:
@@ -71,13 +86,7 @@ class EGaugeClient:
     def get_cooler_current(self):
         return self.get_live_data()["values"]["S8"]["rate"]["n"]
 
-    def get_registers(self):
-        """Named registers as {name: rate}, e.g. "Grid", "Cooler", "EVC", "L1 Voltage".
-
-        The register names/formulas are defined on the meter itself, so this
-        follows whatever is configured there instead of re-deriving power from
-        raw channels.
-        """
+    def _get_register_rows(self):
         response = requests.get(
             f"{self.uri}/api/register",
             headers=self._get_headers(),
@@ -85,8 +94,12 @@ class EGaugeClient:
             timeout=TIMEOUT,
         )
         if response.status_code == 200:
-            return {r["name"]: r.get("rate") for r in response.json()["registers"]}
+            return response.json()["registers"]
         raise Exception(f"Failed to get registers: {response.status_code}")
+
+    def get_registers(self):
+        """Named registers as {name: rate}, using the meter's configured formulas."""
+        return {r["name"]: r.get("rate") for r in self._get_register_rows()}
 
     def get_grid_power(self):
         return self.get_registers()["Grid"]
@@ -98,7 +111,8 @@ class EGaugeClient:
         return self.get_registers()["EVC"]
 
     def get_all_values(self):
-        regs = self.get_registers()
+        rows = self._get_register_rows()
+        regs = {row["name"]: row.get("rate") for row in rows}
         return {
             # L1/L2 are the two 120 V legs; L3 is an unused voltage input (~2 V)
             "l1_voltage": regs.get("L1 Voltage"),
@@ -111,13 +125,25 @@ class EGaugeClient:
             "evcharger_power": regs.get("EVC"),
             "internal_temperature_c": regs.get("Internal Temperature"),
             "internal_humidity": regs.get("Internal Humidity"),
+            "register_readings": [
+                _meter_reading(row["name"], row.get("rate"), RATE_UNITS.get(row.get("type"), ""))
+                for row in rows
+            ],
         }
 
     def get_channel_values(self):
         channels = self.get_live_data()["values"]
 
         def rate(name, key="n"):
-            return channels.get(name, {}).get("rate", {}).get(key)
+            return (channels.get(name, {}).get("rate") or {}).get(key)
+
+        readings = []
+        for name, channel in channels.items():
+            rates = channel.get("rate") or {}
+            unit = RATE_UNITS.get(channel.get("type"), "")
+            for key, label in (("n", "Normal"), ("m", "Mean"), ("f", "Frequency")):
+                if key in rates:
+                    readings.append(_meter_reading(f"{name} · {label}", rates[key], "Hz" if key == "f" else unit))
 
         return {
             "l1_rms_voltage": rate("L1"),
@@ -129,4 +155,5 @@ class EGaugeClient:
             "grid_l2_current": rate("S2"),
             "evcharger_current": rate("S5"),
             "cooler_current": rate("S8"),
+            "channel_readings": readings,
         }

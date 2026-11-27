@@ -54,6 +54,13 @@ CREATE TABLE IF NOT EXISTS solark_workdata (
     readings TEXT NOT NULL
 ) WITHOUT ROWID
 """
+EGAUGE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS egauge_snapshots (
+    source TEXT PRIMARY KEY CHECK (source IN ('registers', 'channels')),
+    ts REAL NOT NULL,
+    readings TEXT NOT NULL
+) WITHOUT ROWID
+"""
 CARBON_SCHEMA = """
 CREATE TABLE IF NOT EXISTS carbon_samples (
     ts REAL PRIMARY KEY,
@@ -117,16 +124,36 @@ def _begin_write(db, legacy, cutoff):
             db.execute(f"ALTER TABLE samples ADD COLUMN {column}")
     if version < 6:
         db.execute(WORKDATA_SCHEMA)
-        db.execute("PRAGMA user_version=6")
+    if version < 7:
+        db.execute(EGAUGE_SCHEMA)
+        db.execute("PRAGMA user_version=7")
 
 
-def record_samples(samples, path=TELEMETRY_DB, legacy=LEGACY_TELEMETRY, *, now=None):
+def record_samples(samples, path=TELEMETRY_DB, legacy=LEGACY_TELEMETRY, *, now=None, egauge_snapshots=()):
     """Append power measurements, import legacy telemetry, and prune old rows."""
     cutoff = (time.time() if now is None else now) - RETENTION_DAYS * DAY
     with closing(sqlite3.connect(path, timeout=2)) as db, db:
         _begin_write(db, legacy, cutoff)
         db.executemany(INSERT, _values(samples, cutoff))
         db.execute("DELETE FROM samples WHERE ts < ?", (cutoff,))
+        db.executemany(
+            """INSERT INTO egauge_snapshots (source, ts, readings) VALUES (?, ?, ?)
+               ON CONFLICT(source) DO UPDATE SET ts = excluded.ts, readings = excluded.readings
+               WHERE excluded.ts >= egauge_snapshots.ts""",
+            ((source, stamp, json.dumps(readings, separators=(",", ":"), allow_nan=False))
+             for source, stamp, readings in egauge_snapshots if readings and numeric(stamp) and stamp >= cutoff),
+        )
+
+
+def read_egauge_snapshots(path):
+    if not path.exists():
+        return {}
+    uri = path.resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
+        if db.execute("PRAGMA user_version").fetchone()[0] < 7:
+            return {}
+        return {source: (stamp, json.loads(readings))
+                for source, stamp, readings in db.execute("SELECT source, ts, readings FROM egauge_snapshots")}
 
 
 def record_carbon(samples, path=TELEMETRY_DB, legacy=LEGACY_TELEMETRY, *, now=None):

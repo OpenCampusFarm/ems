@@ -101,6 +101,7 @@ h3 { font-size: 1.08rem; }
 .diagnostics-list summary { cursor: pointer; font-weight: 650; }
 .diagnostics-list p, .diagnostics-list table { margin-top: 12px; }
 .diagnostics-list table { width: 100%; border-collapse: collapse; font-size: .875rem; }
+.diagnostics-list caption { padding: 6px 4px; text-align: left; font-weight: 650; }
 .diagnostics-list th, .diagnostics-list td { padding: 7px 4px; border-bottom: 1px solid var(--border); text-align: left; overflow-wrap: anywhere; }
 .diagnostics-list tbody th { font-weight: 500; }
 .diagnostics-list td { font-variant-numeric: tabular-nums; }

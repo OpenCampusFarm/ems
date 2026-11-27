@@ -30,7 +30,7 @@ from system_state import (
     save_coolbot_targets, save_mode,
 )
 from telemetry_store import (
-    LEGACY_TELEMETRY, TELEMETRY_DB, numeric, read_carbon, read_dashboard, read_solark_history,
+    LEGACY_TELEMETRY, TELEMETRY_DB, numeric, read_carbon, read_dashboard, read_egauge_snapshots, read_solark_history,
     read_solark_workdata,
 )
 
@@ -272,6 +272,13 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             diagnostics_time, diagnostics = read_solark_workdata(telemetry, now)
         except (OSError, sqlite3.Error, ValueError):
             log.exception("[Portal] Could not read Sol-Ark diagnostics")
+        egauge_details = {}
+        try:
+            for source, (stamp, readings) in read_egauge_snapshots(telemetry).items():
+                formatted_time = datetime.fromtimestamp(stamp, FARM_TIME).strftime("%b %d, %H:%M")
+                egauge_details[source] = (formatted_time, readings, now - stamp > GAP)
+        except (OSError, sqlite3.Error, ValueError):
+            log.exception("[Portal] Could not read eGauge details")
         fields = {key: diagnostic_field(key) for key in diagnostics}
         measurable = [key for key, value in diagnostics.items() if numeric(value)]
         chosen = request.args.get("metric", "BatteryVolt(V)/183")
@@ -313,7 +320,7 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             overview_view=OVERVIEW_VIEW,
             solark=build_chart(solark_rows, now, chart_periods["solark"], solark_view), solark_view=solark_view,
             egauge=build_chart(meter_rows[ranges["egauge"]], now, chart_periods["egauge"], EGAUGE_VIEW),
-            egauge_view=EGAUGE_VIEW,
+            egauge_view=EGAUGE_VIEW, egauge_details=egauge_details,
             carbon=build_chart(carbon_rows, now, chart_periods["carbon"], CARBON_VIEW), carbon_view=CARBON_VIEW,
             selected_view=selected_view, selected_metric=chosen, diagnostics=diagnostics,
             solark_power_series=SOLARK_VIEWS["power"].series,

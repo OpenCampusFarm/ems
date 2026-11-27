@@ -94,7 +94,13 @@ def build_sample(power, egauge, ev, room_temp, moer, policy, *, coolbot_setpoint
 def publish(power, egauge, ev, room_temp, moer, policy, *, coolbot_setpoint_f=None):
     sample = build_sample(power, egauge, ev, room_temp, moer, policy,
                           coolbot_setpoint_f=coolbot_setpoint_f)
+    meter = egauge or {}
+    snapshots = (
+        (source, sample["ts"], meter[field])
+        for source, field in (("registers", "register_readings"), ("channels", "channel_readings"))
+        if meter.get(field)
+    )
     try:
-        record_samples((sample,))
+        record_samples((sample,), egauge_snapshots=snapshots)
     except (OSError, sqlite3.Error) as exc:
         log.warning("Could not publish portal telemetry: %s", exc)

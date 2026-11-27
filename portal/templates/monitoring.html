@@ -165,6 +165,25 @@
             {% endfor %}
         </div>
         {{ chart_panel(egauge, egauge_view, 'egauge', 'egauge-chart-viewport', 'Negative grid power = export.') }}
+        <details id="egauge-diagnostics" class="panel diagnostics-list">
+            <summary>All eGauge readings</summary>
+            {% if egauge_details %}
+                {% for key, label in [('registers', 'Meter registers'), ('channels', 'Live channels')] if key in egauge_details %}
+                {% set stamp, readings, age_warning = egauge_details[key] %}
+                <table>
+                    <caption>{{ label }} <span class="muted">· {{ stamp }} ET{% if age_warning %} · Stale{% endif %}</span></caption>
+                    <thead><tr><th scope="col">Reading</th><th scope="col">Value</th><th scope="col">Unit</th></tr></thead>
+                    <tbody>
+                        {% for reading in readings %}
+                        <tr><th scope="row">{{ reading.name }}</th><td>{{ '{:,.3f}'.format(reading.value).rstrip('0').rstrip('.') if numeric(reading.value) else '—' }}</td><td>{{ reading.unit }}</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% endfor %}
+            {% else %}
+                <p class="muted">Waiting for eGauge readings.</p>
+            {% endif %}
+        </details>
     </section>
     <section class="panel chart carbon-chart">
         <div class="panel-heading"><h2>Estimated CO₂ avoided</h2><span class="muted">kg/h · {{ chart_periods.carbon.summary }} · ET</span></div>
