@@ -224,27 +224,44 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
 
     @app.get("/monitoring")
     def monitoring():
-        key = request.args.get("range", DEFAULT_PERIOD)
-        if key not in PERIODS:
-            key = DEFAULT_PERIOD
-        period = PERIODS[key]
+        shared_range = request.args.get("range", DEFAULT_PERIOD)
+        if shared_range not in PERIODS:
+            shared_range = DEFAULT_PERIOD
+        ranges = {}
+        for chart in ("overview", "solark", "egauge", "carbon"):
+            selected = request.args.get(f"{chart}_range", shared_range)
+            ranges[chart] = selected if selected in PERIODS else shared_range
         selected_view = request.args.get("view", "power")
         if selected_view not in (*SOLARK_VIEWS, "diagnostics"):
             selected_view = "power"
         solark_view = SOLARK_VIEWS.get(selected_view, SOLARK_VIEWS["power"])
         now = time.time()
-        start = now - period.duration
-        buckets = chart_buckets(start, now, period.bucket)
+
+        def window(key):
+            period = PERIODS[key]
+            start = now - period.duration
+            return start, chart_buckets(start, now, period.bucket)
+
         unavailable = False
+        latest = {}
+        meter_rows = {}
+        meter_ranges = [ranges["overview"], ranges["egauge"]]
+        if selected_view != "diagnostics":
+            meter_ranges.append(ranges["solark"])
+        for key in dict.fromkeys(meter_ranges):
+            start, buckets = window(key)
+            try:
+                sample, meter_rows[key] = read_dashboard(
+                    telemetry, None if demo else legacy, start, now, buckets
+                )
+                if not latest:
+                    latest = sample
+            except (OSError, sqlite3.Error):
+                log.exception("[Portal] Could not read telemetry")
+                meter_rows[key] = []
+                unavailable = True
         try:
-            latest, rows = read_dashboard(
-                telemetry, None if demo else legacy, start, now, buckets
-            )
-        except (OSError, sqlite3.Error):
-            log.exception("[Portal] Could not read telemetry")
-            latest, rows = {}, []
-            unavailable = True
-        try:
+            start, buckets = window(ranges["carbon"])
             carbon_rows = read_carbon(telemetry, start, now, buckets)
         except (OSError, sqlite3.Error):
             log.exception("[Portal] Could not read carbon estimates")
@@ -260,13 +277,14 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
         chosen = request.args.get("metric", "BatteryVolt(V)/183")
         if chosen not in measurable:
             chosen = next(iter(measurable), None)
-        solark_rows = rows
+        solark_rows = meter_rows.get(ranges["solark"], [])
         if selected_view == "diagnostics":
             solark_rows = []
             if chosen:
                 label, unit, _ = fields[chosen]
                 solark_view = ChartView(label, unit, 0.01, 3, {"reading": label}, include_zero=False)
                 try:
+                    start, buckets = window(ranges["solark"])
                     solark_rows = read_solark_history(telemetry, chosen, start, now, buckets)
                 except (OSError, sqlite3.Error, ValueError):
                     log.exception("[Portal] Could not read historical Sol-Ark diagnostics")
@@ -279,18 +297,31 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             if coolbot and now - coolbot.ts > STALE_SECONDS
             else None
         )
+        range_params = {f"{chart}_range": key for chart, key in ranges.items()}
+        query = {**range_params, "view": selected_view, "metric": chosen}
+
+        def chart_url(endpoint, **changes):
+            return url_for(endpoint, **{**query, **changes})
+
+        def range_url(endpoint, chart, key):
+            return chart_url(endpoint, **{f"{chart}_range": key})
+
+        chart_periods = {chart: PERIODS[key] for chart, key in ranges.items()}
         html = render_template(
             "monitoring.html", latest=latest,
-            overview=build_chart(rows, now, period, OVERVIEW_VIEW), overview_view=OVERVIEW_VIEW,
-            solark=build_chart(solark_rows, now, period, solark_view), solark_view=solark_view,
-            egauge=build_chart(rows, now, period, EGAUGE_VIEW), egauge_view=EGAUGE_VIEW,
-            carbon=build_chart(carbon_rows, now, period, CARBON_VIEW), carbon_view=CARBON_VIEW,
+            overview=build_chart(meter_rows[ranges["overview"]], now, chart_periods["overview"], OVERVIEW_VIEW),
+            overview_view=OVERVIEW_VIEW,
+            solark=build_chart(solark_rows, now, chart_periods["solark"], solark_view), solark_view=solark_view,
+            egauge=build_chart(meter_rows[ranges["egauge"]], now, chart_periods["egauge"], EGAUGE_VIEW),
+            egauge_view=EGAUGE_VIEW,
+            carbon=build_chart(carbon_rows, now, chart_periods["carbon"], CARBON_VIEW), carbon_view=CARBON_VIEW,
             selected_view=selected_view, selected_metric=chosen, diagnostics=diagnostics,
             solark_power_series=SOLARK_VIEWS["power"].series,
             fields=fields, measurable=measurable, solark_status=status,
             diagnostics_time=(datetime.fromtimestamp(diagnostics_time, FARM_TIME).strftime("%b %d, %H:%M")
                               if diagnostics_time is not None else None),
-            periods=PERIODS, selected=key, period=period, unavailable=unavailable,
+            periods=PERIODS, ranges=ranges, chart_periods=chart_periods, unavailable=unavailable,
+            chart_url=chart_url, range_url=range_url, range_params=range_params,
             last_sample=datetime.fromtimestamp(latest["ts"], FARM_TIME).strftime("%b %d, %H:%M")
             if latest else None,
             stale=bool(latest and now - latest["ts"] > GAP),
@@ -301,7 +332,7 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
         )
         if (request.endpoint == "monitoring" and request.args.get("metric_form")
                 and request.headers.get("HX-Request") == "true"):
-            return html, {"HX-Replace-Url": url_for("index", range=key, view=selected_view, metric=chosen)}
+            return html, {"HX-Replace-Url": chart_url("index")}
         return html
     log.info("[Portal] Initialized in %s mode", "demo" if demo else "production")
     return app

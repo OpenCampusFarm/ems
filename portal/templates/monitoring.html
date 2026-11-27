@@ -19,11 +19,22 @@
     </div>
 </div>
 {% endmacro %}
-{% macro chart_panel(chart, view, viewport_id, note=None) %}
+{% macro range_picker(chart, label) %}
+<nav class="periods" aria-label="{{ label }} time range">
+    {% for key, option in periods.items() %}
+    <a href="{{ range_url('index', chart, key) }}" hx-get="{{ range_url('monitoring', chart, key) }}"
+       hx-target="#monitoring" hx-swap="outerHTML" hx-sync="#monitoring:replace"
+       hx-replace-url="{{ range_url('index', chart, key) }}"
+       {% if key == ranges[chart] %}aria-current="true"{% endif %}>{{ option.label }}</a>
+    {% endfor %}
+</nav>
+{% endmacro %}
+{% macro chart_panel(chart, view, chart_key, viewport_id, note=None) %}
 <div class="panel chart">
     <div class="panel-heading">
-        <h3>{{ view.label }}</h3><span class="muted">{% if view.unit %}{{ view.unit }} · {% endif %}{{ period.summary }} · ET</span>
+        <h3>{{ view.label }}</h3><span class="muted">{% if view.unit %}{{ view.unit }} · {% endif %}{{ chart_periods[chart_key].summary }} · ET</span>
     </div>
+    {{ range_picker(chart_key, {'overview': 'Power flow', 'solark': 'Sol-Ark', 'egauge': 'eGauge'}[chart_key]) }}
     {% if caller is defined %}{{ caller() }}{% endif %}
     {% if chart.available %}
     {{ plot(chart, view, viewport_id) }}
@@ -38,7 +49,7 @@
     {% endif %}
 </div>
 {% endmacro %}
-<div id="monitoring" hx-get="{{ url_for('monitoring', range=selected, view=selected_view, metric=selected_metric) }}"
+<div id="monitoring" hx-get="{{ chart_url('monitoring') }}"
      hx-trigger="every 15s, refresh-monitoring" hx-swap="outerHTML" hx-sync="this:drop">
     <div class="status">
         <div><strong>EMS service</strong><span class="badge {{ 'running' if ems_service == 'Running' }}">{{ ems_service }}</span></div>
@@ -85,16 +96,7 @@
             </div>
             {% endfor %}
         </div>
-        {% call chart_panel(overview, overview_view, 'power-chart-viewport', 'Negative grid power = export.') %}
-            <nav class="periods" aria-label="Chart time range">
-                {% for key, option in periods.items() %}
-                <a id="power-period-{{ key }}" href="{{ url_for('index', range=key, view=selected_view, metric=selected_metric) }}"
-                   hx-get="{{ url_for('monitoring', range=key, view=selected_view, metric=selected_metric) }}" hx-target="#monitoring"
-                   hx-swap="outerHTML" hx-sync="#monitoring:replace" hx-replace-url="{{ url_for('index', range=key, view=selected_view, metric=selected_metric) }}"
-                   {% if key == selected %}aria-current="true"{% endif %}>{{ option.label }}</a>
-                {% endfor %}
-            </nav>
-        {% endcall %}
+        {{ chart_panel(overview, overview_view, 'overview', 'power-chart-viewport', 'Negative grid power = export.') }}
     </section>
     <section class="monitoring-group" aria-labelledby="solark-heading">
         <h2 id="solark-heading">Sol-Ark</h2>
@@ -106,20 +108,22 @@
             {% endfor %}
             {{ meter_card('battery_soc', 'Stationary battery charge', latest.get('battery_soc'), '%') }}
         </div>
-        {% call chart_panel(solark, solark_view, 'solark-chart-viewport',
+        {% call chart_panel(solark, solark_view, 'solark', 'solark-chart-viewport',
                            'Negative grid power = export. Negative battery power = charging.' if selected_view == 'power' else none) %}
             <nav class="periods" aria-label="Sol-Ark chart reading">
                 {% for key, label in [('power', 'Power'), ('charge', 'Battery charge'), ('diagnostics', 'Diagnostics')] %}
-                <a href="{{ url_for('index', range=selected, view=key, metric=selected_metric) }}"
-                   hx-get="{{ url_for('monitoring', range=selected, view=key, metric=selected_metric) }}" hx-target="#monitoring"
-                   hx-swap="outerHTML" hx-sync="#monitoring:replace" hx-replace-url="{{ url_for('index', range=selected, view=key, metric=selected_metric) }}"
+                <a href="{{ chart_url('index', view=key) }}"
+                   hx-get="{{ chart_url('monitoring', view=key) }}" hx-target="#monitoring"
+                   hx-swap="outerHTML" hx-sync="#monitoring:replace" hx-replace-url="{{ chart_url('index', view=key) }}"
                    {% if key == selected_view %}aria-current="true"{% endif %}>{{ label }}</a>
                 {% endfor %}
             </nav>
             {% if selected_view == 'diagnostics' and measurable %}
             <form class="diagnostic-picker" method="get" action="{{ url_for('index') }}"
                   hx-get="{{ url_for('monitoring') }}" hx-target="#monitoring" hx-swap="outerHTML" hx-sync="#monitoring:replace">
-                <input type="hidden" name="range" value="{{ selected }}">
+                {% for name, value in range_params.items() %}
+                <input type="hidden" name="{{ name }}" value="{{ value }}">
+                {% endfor %}
                 <input type="hidden" name="view" value="diagnostics">
                 <input type="hidden" name="metric_form" value="1">
                 <label for="diagnostic-metric">Inverter reading</label>
@@ -160,10 +164,11 @@
             {{ meter_card(key, label, latest.get(key), 'W') }}
             {% endfor %}
         </div>
-        {{ chart_panel(egauge, egauge_view, 'egauge-chart-viewport', 'Negative grid power = export.') }}
+        {{ chart_panel(egauge, egauge_view, 'egauge', 'egauge-chart-viewport', 'Negative grid power = export.') }}
     </section>
     <section class="panel chart carbon-chart">
-        <div class="panel-heading"><h2>Estimated CO₂ avoided</h2><span class="muted">kg/h · {{ period.summary }} · ET</span></div>
+        <div class="panel-heading"><h2>Estimated CO₂ avoided</h2><span class="muted">kg/h · {{ chart_periods.carbon.summary }} · ET</span></div>
+        {{ range_picker('carbon', 'Estimated CO₂ avoided') }}
         {% if carbon.available %}
         {{ plot(carbon, carbon_view, 'carbon-chart-viewport') }}
         {% else %}
