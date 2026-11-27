@@ -34,13 +34,13 @@ Follow the [Raspberry Pi setup](portal/README.md#install-on-the-raspberry-pi). O
 
 This starts supervisord, which manages the following processes:
 
-| Program   | Description                                          |
-| --------- | ---------------------------------------------------- |
-| `core`    | Runs `core/main.py` from the core virtual environment                         |
-| `fan`     | Runs `fan/main.py` from the fan virtual environment                          |
+| Program               | Description                                             |
+| --------------------- | ------------------------------------------------------- |
+| `core`                | Runs `core/main.py` from the core virtual environment   |
+| `fan`                 | Runs `fan/main.py` from the fan virtual environment     |
 | `dashboard_publisher` | Publishes power and carbon readings to the farm website |
-| `portal`  | Runs the operator web console                          |
-| `updater` | Polls GitHub every 2 min and restarts on new commits |
+| `portal`              | Runs the operator web console                           |
+| `updater`             | Polls GitHub every 2 min and restarts on new commits    |
 
 ## Auto-update
 
@@ -71,3 +71,36 @@ tail -f /tmp/ems_fan.log
 tail -f /tmp/ems_updater.log
 tail -f /tmp/ems_portal.log
 ```
+
+## Acknowledgements
+
+We would like to express our gratitude to everyone who contributed to the success of this project:
+
+### Team Members
+
+- **Amanullah Azim**.
+- **Nolan Lysaght**.
+- **Nelson Figueroa**.
+- **Ke Liu**.
+- **Xinyi Xu**.
+- **Nathan Newman**.
+- **Tongyuan Miao**.
+- **Charlotte Ma**.
+- **Trisina Simanjuntak**.
+- **Jia-Qi "Joeky" Zhan**.
+
+### Mentors
+
+- **Johanna Mathieu**.
+- **Ang Chen**.
+
+### Sponsors
+
+- **Jeremy Moghtader** @ U-M Matthaei Botanical Gardens and Nichols Arboretum.
+
+### Student Mentors
+
+- **Samuel Fay**.
+- **Brendan Ireland**.
+
+Your support and expertise made this project possible, and we are deeply grateful!
