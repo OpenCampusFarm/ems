@@ -1,12 +1,4 @@
-{% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
-{% if message %}<p class="notice" role="status">{{ message }}</p>{% endif %}
-{% if state %}
-<div class="control-grid">
-    {% for target, title, description in (
-        ('fan', 'Ventilation fan', none),
-        ('ems', 'EMS automation', 'Off stops automatic CoolBot setpoint changes and returns charging control to OpenEVSE. CoolBot keeps its current setpoint.'),
-        ('charging_policy', 'EV charging policy', 'Binary requests 12 A. Staged selects from 6, 20, 34, and 48 A. Both pause when estimated surplus solar is too low.'))
-    %}
+{% macro mode_card(target, title, description=none) %}
     <section class="panel control-panel" aria-labelledby="{{ target }}-title">
         <div class="panel-heading">
             <h3 id="{{ target }}-title">{{ title }}</h3>
@@ -47,7 +39,14 @@
             <p class="applying" role="status">Applying mode…</p>
         </form>
     </section>
-    {% endfor %}
+{% endmacro %}
+
+{% if error %}<p class="notice error" role="alert">{{ error }}</p>{% endif %}
+{% if message %}<p class="notice" role="status">{{ message }}</p>{% endif %}
+{% if state %}
+<div class="control-grid">
+    {{ mode_card('ems', 'EMS automation', 'Off stops automatic CoolBot setpoint changes and returns charging control to OpenEVSE. CoolBot keeps its current setpoint.') }}
+    {{ mode_card('charging_policy', 'EV charging policy', 'Binary requests 12 A. Staged selects from 6, 20, 34, and 48 A. Both pause when estimated surplus solar is too low.') }}
     <section class="panel control-panel" aria-labelledby="coolbot-title">
         <h3 id="coolbot-title">CoolBot setpoints</h3>
         <p class="muted" id="coolbot-rule">EMS uses the clean-energy target when solar reaches 500 W or grid carbon is below 1,400 lb CO₂/MWh.</p>
@@ -73,5 +72,6 @@
             <p class="applying" role="status">Saving targets…</p>
         </form>
     </section>
+    {{ mode_card('fan', 'Ventilation fan') }}
 </div>
 {% endif %}
