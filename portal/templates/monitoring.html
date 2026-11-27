@@ -112,7 +112,7 @@
                            'Negative grid power = export. Negative battery power = charging.' if selected_view == 'power' else none) %}
             <nav class="periods" aria-label="Sol-Ark chart reading">
                 {% for key, label in [('power', 'Power'), ('charge', 'Battery charge'), ('diagnostics', 'Diagnostics')] %}
-                <a href="{{ chart_url('index', view=key) }}"
+                <a id="solark-view-{{ key }}" href="{{ chart_url('index', view=key) }}"
                    hx-get="{{ chart_url('monitoring', view=key) }}" hx-target="#monitoring"
                    hx-swap="outerHTML" hx-sync="#monitoring:replace" hx-replace-url="{{ chart_url('index', view=key) }}"
                    {% if key == selected_view %}aria-current="true"{% endif %}>{{ label }}</a>

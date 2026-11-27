@@ -29,7 +29,8 @@ button:disabled, fieldset:disabled button { opacity: .5; cursor: wait; }
 .brand-detail { color: #b3d4d8; font-weight: 500; }
 .sign-out { min-height: 42px; border: 1px solid #61848b; border-radius: 8px; padding: 0 12px; background: transparent; color: #fff; white-space: nowrap; }
 .sign-out:hover { background: #24505a; }
-.dashboard { padding-block: 34px 42px; }
+/* HTMX replaces the monitoring block, which can move the browser's scroll anchor to Controls. */
+.dashboard { padding-block: 34px 42px; overflow-anchor: none; }
 .intro { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 22px; }
 h1 { font-size: clamp(1.85rem, 3.8vw, 2.75rem); letter-spacing: -.045em; line-height: 1.05; }
 h2 { font-size: 1.27rem; }
