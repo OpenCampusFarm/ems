@@ -12,11 +12,11 @@ Controls a ventilation fan on a Raspberry Pi based on outdoor temperature and Co
 
 Auto checks temperatures every 30 seconds. The fan can cool the room before CoolBot calls for cooling at its own setpoint.
 
-- **On** when the room reaches 0.5°F below the setpoint and outdoor air is at least 3°F cooler than the room.
-- **Off** when the room reaches 1°F below the setpoint, the outdoor air is at most 1°F cooler than the room, or CoolBot is off, offline, or missing data.
+- **On** when the room reaches 1°F below the setpoint and outdoor air is at least 3°F cooler than the room.
+- **Off** when the room reaches 1.5°F below the setpoint, the outdoor air is at most 1°F cooler than the room, or CoolBot is off, offline, or missing data.
 - **Hold** the current fan state between thresholds.
 
-At a 45°F CoolBot setpoint, the fan can start at 44.5°F and stops at 44°F. The thresholds follow the active setpoint.
+At a 45°F CoolBot setpoint, the fan can start at 44°F and stops at 43.5°F. The thresholds follow the active setpoint.
 
 ## Raspberry Pi Access
 
