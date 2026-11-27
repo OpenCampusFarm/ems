@@ -31,7 +31,7 @@ class ChartView(NamedTuple):
 
 OVERVIEW_VIEW = ChartView("Power flow", "W", 1000, 0, {
     "pv": "Solar production",
-    "grid": "Grid power",
+    "solark_grid_w": "Grid power",
     "ev": "EV circuit power",
 })
 SOLARK_VIEWS = {

@@ -81,7 +81,7 @@
                 </div>
             </div>
             {{ meter_card('pv', overview_view.series.pv, latest.get('pv'), 'kW', 'Sol-Ark') }}
-            {{ meter_card('grid', overview_view.series.grid, latest.get('grid'), 'kW', latest.get('grid_source') or 'eGauge') }}
+            {{ meter_card('solark_grid_w', overview_view.series.solark_grid_w, latest.get('solark_grid_w'), 'kW', 'Sol-Ark') }}
             {% for key, label, field, pattern in (
                 ('room', 'Cool room temperature', 'room_f', '%.1f'),
                 ('setpoint', 'CoolBot setpoint', 'setpoint_f', '%g')
@@ -100,7 +100,7 @@
             </div>
             {% endfor %}
         </div>
-        {{ chart_panel(overview, overview_view, 'overview', 'power-chart-viewport', 'Negative grid power = export.') }}
+        {{ chart_panel(overview, overview_view, 'overview', 'power-chart-viewport', 'Negative Sol-Ark grid power = export.') }}
     </section>
     <section class="monitoring-group" aria-labelledby="solark-heading">
         <h2 id="solark-heading">Sol-Ark</h2>
