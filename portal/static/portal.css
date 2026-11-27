@@ -40,7 +40,7 @@ h3 { font-size: 1.08rem; }
 .badge { display: inline-block; border-radius: 5px; background: #e8eff2; color: #2e505e; padding: 4px 8px; font-size: .875rem; font-weight: 650; white-space: nowrap; }
 .badge.running { color: #07564c; background: #dcf3e9; }
 .badge.preview { color: #634b0a; background: #f9edc2; }
-.status { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px 18px; padding: 13px 16px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 10px; background: #f5f9fa; }
+.status { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px 18px; padding: 13px 16px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 10px; background: #f5f9fa; }
 .status > div { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; font-size: .875rem; }
 .status strong { font-weight: 650; }
 .monitoring-group + .monitoring-group { margin-top: clamp(40px, 5vw, 64px); }

@@ -2,9 +2,10 @@
 
 Python, Flask and HTMX operator console for the Campus Farm Raspberry Pi.
 
-- **Fan** selects Off, On, or Auto. Auto runs the existing CoolBot and outdoor-temperature rules. Manual modes set the relay without waiting for a network connection.
+- **Fan** selects Off, On, or Auto. Auto runs the existing CoolBot and outdoor-temperature rules. The Auto badge reports the fan relay's On or Off setting every five seconds. Manual modes set the relay without waiting for a network connection.
 - **EMS** selects On or Off. Off stops automatic CoolBot setpoint changes and releases the EMS claim on OpenEVSE. CoolBot continues using its last setpoint. OpenEVSE may charge under its own settings.
-- **EV charging policy** selects Binary or Staged. Binary requests a fixed 12 A when enough surplus solar is available. Staged requests the highest solar-covered step from 6, 20, 34, and 48 A. A policy change restarts core if EMS is on. With EMS off, the portal saves the policy for the next start. Monitoring labels the policy from the last telemetry sample.
+- **EV charging policy** selects Binary or Staged. Binary requests a fixed 12 A when enough surplus solar is available. Staged requests the highest solar-covered step from 6, 20, 34, and 48 A. A policy change restarts core if EMS is on. With EMS off, the portal saves the policy for the next start.
+- **Outdoor temperature** shows the Pi's DS18B20 reading in the top status row. If the sensor is unavailable, the portal labels its Open-Meteo fallback as an estimate.
 - **CoolBot setpoints** saves two whole-degree Fahrenheit targets (34–65°F) to `system.db`. EMS selects the clean-energy target (default 45°F) when solar is at least 500 W or WattTime MOER is below 1400 lb CO₂/MWh, and otherwise selects the other target (default 50°F). Core reads both on its next cycle, normally within five minutes. With EMS off, the new targets are saved for the next start.
 - **WattTime MOER** shows the marginal grid emissions rate from the latest EMS sample in lb CO₂/MWh, with the sample time in Eastern time. The card flags stale telemetry and shows a dash when that sample has no WattTime reading.
 - **Cool room temperature** and **CoolBot setpoint** come from a read-only CoolBot WebSocket poll every 30 seconds. The portal uses the CoolBot credentials from `core/.env` and reads independently of EMS or fan mode. If a reading is over a minute old, both cards show when the portal last read it.

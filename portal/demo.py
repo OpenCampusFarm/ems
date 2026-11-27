@@ -6,6 +6,7 @@ from datetime import datetime
 from itertools import chain
 
 from coolbot_monitor import CoolBotReading
+from outdoor_monitor import OutdoorReading
 from power_flow import FARM_TIME
 from telemetry_store import DAY, record_carbon, record_samples, record_solark_workdata
 
@@ -43,6 +44,10 @@ def sample_coolbot():
     now = time.time()
     hour = datetime.fromtimestamp(now, FARM_TIME).hour
     return CoolBotReading(44 + 1.4 * math.sin(hour / 4), 45, now)
+
+
+def sample_outdoor():
+    return OutdoorReading(42.1, False)
 
 
 def write_samples(path):

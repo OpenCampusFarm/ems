@@ -8,7 +8,15 @@
         ('charging_policy', 'EV charging policy', 'Binary requests 12 A. Staged selects from 6, 20, 34, and 48 A. Both pause when estimated surplus solar is too low.'))
     %}
     <section class="panel control-panel" aria-labelledby="{{ target }}-title">
-        <div class="panel-heading"><h3 id="{{ target }}-title">{{ title }}</h3><span class="badge">Requested · {{ state[target] | title }}</span></div>
+        <div class="panel-heading">
+            <h3 id="{{ target }}-title">{{ title }}</h3>
+            {% if target == 'fan' and fan_status %}
+            <span class="badge" id="fan-auto-status" title="Fan relay state"
+                  hx-get="{{ url_for('fan_auto_status') }}" hx-trigger="every 5s" hx-swap="innerHTML">{{ fan_status }}</span>
+            {% else %}
+            <span class="badge">Requested · {{ state[target] | title }}</span>
+            {% endif %}
+        </div>
         <p class="muted">{{ description }}</p>
         {% if target == 'charging_policy' and state.ems == 'off' %}
         <p class="muted">This setting takes effect when EMS automation is on.</p>

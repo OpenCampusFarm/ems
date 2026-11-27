@@ -54,8 +54,12 @@
     <div class="status">
         <div><strong>EMS service</strong><span class="badge {{ 'running' if ems_service == 'Running' }}">{{ ems_service }}</span></div>
         <div><strong>Fan service</strong><span class="badge {{ 'running' if fan_service == 'Running' }}">{{ fan_service }}</span></div>
-        <div><strong>Last recorded policy</strong><span>{{ (latest.get('policy') or '—') | title }}</span></div>
         <div><strong>Telemetry</strong><span>{{ last_sample ~ ' ET' if last_sample else 'Waiting for data' }}{% if stale %} · Stale{% endif %}</span></div>
+        <div>
+            <strong>Outdoor temperature</strong>
+            <span>{% if outdoor %}{{ '%.1f' | format(outdoor.temp_f) }} °F{% else %}Unavailable{% endif %}</span>
+            {% if outdoor and outdoor.estimated %}<span class="muted">Open-Meteo estimate</span>{% endif %}
+        </div>
     </div>
     {% if unavailable %}<p class="notice error" role="status">Telemetry is temporarily unavailable.</p>{% endif %}
     {% if stale %}<p class="notice">Showing the last recorded measurements. The EMS has not published a sample in over 12 minutes.</p>{% endif %}

@@ -18,9 +18,11 @@ from dotenv import load_dotenv
 from flask import Flask, abort, redirect, render_template, request, session, url_for
 
 from coolbot_monitor import STALE_SECONDS, CoolBotMonitor
-from process_control import apply_mode, service_status
+from process_control import apply_mode, service_info, service_status
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from fan_runtime import read_auto_fan_status
+from outdoor_monitor import OutdoorMonitor
 from power_flow import (
     CARBON_VIEW, DEFAULT_PERIOD, EGAUGE_VIEW, FARM_TIME, GAP, OVERVIEW_VIEW, PERIODS, SOLARK_VIEWS, ChartView,
     build_chart, chart_buckets,
@@ -45,7 +47,7 @@ def diagnostic_field(key):
 
 
 def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
-               legacy=LEGACY_TELEMETRY, read_coolbot=None):
+               legacy=LEGACY_TELEMETRY, read_coolbot=None, read_outdoor=None):
     load_dotenv(Path(__file__).with_name(".env"))
 
     app = Flask(__name__)
@@ -54,10 +56,12 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
     secret_key = os.environ.get("PORTAL_SECRET_KEY", "")
     valid_secret = len(secret_key) >= 32 and not secret_key.startswith("replace-with-")
     if demo:
-        if read_coolbot is None:
-            from demo import sample_coolbot
+        from demo import sample_coolbot, sample_outdoor
 
+        if read_coolbot is None:
             read_coolbot = sample_coolbot
+        if read_outdoor is None:
+            read_outdoor = sample_outdoor
         if not password or password.startswith("replace-with-"):
             username, password = "operator", "farm-preview"
         # A configured preview stays signed in across restarts with its own signing key.
@@ -143,6 +147,16 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
         log.info("[Portal] Operator signed out")
         return redirect(url_for("login"), code=303)
 
+    @app.get("/fan/status")
+    def fan_auto_status():
+        if demo:
+            return "Auto · Off"
+        status, pid = service_info("fan")
+        on = read_auto_fan_status(pid) if status == "Running" and pid else None
+        if on is None:
+            return "Auto · Status unavailable"
+        return "Auto · On" if on else "Auto · Off"
+
     def controller_cards(message=None, error=None):
         try:
             state = read_state(database)
@@ -151,6 +165,7 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             state = None
             error = "Controller settings are unavailable. Check system.db."
         return render_template("controls.html", state=state, modes=MODES, demo=demo,
+                               fan_status=fan_auto_status() if state and state["fan"] == "auto" else None,
                                coolbot_min=COOLBOT_MIN_F, coolbot_max=COOLBOT_MAX_F,
                                csrf=csrf_token(), message=message, error=error)
 
@@ -333,6 +348,7 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             if latest else None,
             stale=bool(latest and now - latest["ts"] > GAP),
             coolbot=coolbot, coolbot_last_read=coolbot_last_read,
+            outdoor=read_outdoor() if read_outdoor else None,
             ems_service="Preview" if demo else service_status("ems"),
             fan_service="Preview" if demo else service_status("fan"),
             numeric=numeric,
@@ -366,8 +382,10 @@ if __name__ == "__main__":
                   channel_timeout=150)
     elif not sys.argv[1:]:
         monitor = CoolBotMonitor()
-        app = create_app(read_coolbot=monitor.read)
+        outdoor_monitor = OutdoorMonitor()
+        app = create_app(read_coolbot=monitor.read, read_outdoor=outdoor_monitor.read)
         monitor.start()
+        outdoor_monitor.start()
         serve(app, host="127.0.0.1", port=8080, channel_timeout=150)
     else:
         sys.exit("Usage: python app.py [--demo]")

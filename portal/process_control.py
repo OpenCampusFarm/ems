@@ -68,14 +68,20 @@ def _start(rpc, program, original_pid):
         time.sleep(0.25)
 
 
-def service_status(target):
+def service_info(target):
     try:
         with _supervisor(3) as rpc:
-            state = rpc.supervisor.getProcessInfo(PROGRAMS[target])["statename"].upper()
-        return {
-            "RUNNING": "Running", "STOPPED": "Stopped", "EXITED": "Stopped",
-            "FATAL": "Failed", "BACKOFF": "Failed", "STARTING": "Starting",
-            "STOPPING": "Stopping",
-        }.get(state, "Unavailable")
+            info = rpc.supervisor.getProcessInfo(PROGRAMS[target])
     except (OSError, http.client.HTTPException, xmlrpc.client.Error):
-        return "Unavailable"
+        return "Unavailable", None
+    state = info["statename"].upper()
+    label = {
+        "RUNNING": "Running", "STOPPED": "Stopped", "EXITED": "Stopped",
+        "FATAL": "Failed", "BACKOFF": "Failed", "STARTING": "Starting",
+        "STOPPING": "Stopping",
+    }.get(state, "Unavailable")
+    return label, info.get("pid")
+
+
+def service_status(target):
+    return service_info(target)[0]
