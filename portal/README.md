@@ -6,7 +6,8 @@ Flask and HTMX console for monitoring and controlling the Campus Farm EMS.
 
 - **Fan** selects Off, On, or Auto. In Auto, the badge shows the current relay state.
 - **EMS** Off pauses CoolBot setpoint changes and returns charging control to OpenEVSE.
-- **Charging policy** selects Binary or Staged. **CoolBot setpoints** lets you edit both temperature targets. [Core decision logic](../core/README.md#decision-logic)
+- **Charging policy** selects Binary, Staged, or Manual. In Manual, release the slider to request 6–48 A or choose 0 A to pause. Select Binary or Staged to resume automatic charging.
+- **CoolBot setpoints** lets you edit both temperature targets. [Core decision logic](../core/README.md#decision-logic)
 
 Settings live in `system.db`. The defaults are Fan Auto, EMS On, and Staged charging. Charts read up to 3,650 days of history from `telemetry.db`.
 

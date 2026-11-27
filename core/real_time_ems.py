@@ -28,7 +28,7 @@ import requests
 from dotenv import load_dotenv
 
 from dashboard_telemetry import publish
-from system_state import read_state
+from system_state import ev_control_lock, read_state
 from telemetry_store import numeric, record_solark_workdata
 
 from Loads.coolbot import change_setpoint, get_coolbot_temp, get_room_temp
@@ -251,12 +251,18 @@ def run_ems_cycle(policy: str) -> None:
         excess_pv_watts(pv_w, load_w, ev_data["power_w"])
         if numeric(pv_w) and numeric(load_w) else 0.0
     )
-    amps = choose_ev_amps(surplus_w, policy)
     try:
-        set_charging(amps > 0, amps)
-        log.info("[EV] %s requested %d A (estimated surplus solar %.0f W)", policy, amps, surplus_w)
+        with ev_control_lock():
+            state = read_state()
+            if _stop.is_set() or state["ems"] == "off":
+                return
+            manual = state["ev_manual_amps"]
+            amps = choose_ev_amps(surplus_w, policy) if manual is None else manual
+            set_charging(amps > 0, amps)
+        log.info("[EV] %s requested %d A (estimated surplus solar %.0f W)",
+                 policy if manual is None else "manual", amps, surplus_w)
     except Exception as exc:
-        log.error("[EV] %s request for %d A failed: %s", policy, amps, exc)
+        log.error("[EV] Charging current request failed: %s", exc)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -287,7 +293,8 @@ def _sleep_interruptible(seconds: float) -> None:
 def shutdown() -> None:
     """Hand EV control back to the charger so a stopped EMS never leaves it blocked."""
     try:
-        release_claim()
+        with ev_control_lock():
+            release_claim()
         log.info("[EV] Claim released")
     except (requests.ConnectionError, requests.Timeout):
         log.info("[EV] OpenEVSE not reachable — nothing to release")

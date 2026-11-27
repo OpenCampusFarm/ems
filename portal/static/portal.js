@@ -11,6 +11,15 @@ if (connectionAlert) {
     });
 }
 
+document.body.addEventListener("input", ({ target }) => {
+    if (target.id !== "ev-current-slider") return;
+    // The first slider position is a pause. Charging starts at the next step (6 A).
+    const amps = target.value === target.min ? 0 : target.valueAsNumber;
+    target.form.elements.amps.value = amps;
+    target.setAttribute("aria-valuetext", amps ? `${amps} A` : "0 A (pause)");
+    document.getElementById("ev-current-value").value = `${amps} A`;
+});
+
 const chartTime = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Detroit", month: "short", day: "numeric", year: "numeric",
     hour: "numeric", minute: "2-digit", timeZoneName: "short",

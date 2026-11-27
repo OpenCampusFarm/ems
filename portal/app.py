@@ -14,6 +14,7 @@ from pathlib import Path
 from threading import Lock
 from xmlrpc.client import Error as RPCError
 
+import requests
 from dotenv import load_dotenv
 from flask import Flask, abort, redirect, render_template, request, session, url_for
 
@@ -21,6 +22,7 @@ from coolbot_monitor import STALE_SECONDS, CoolBotMonitor
 from process_control import apply_mode, service_info, service_status
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.append(str(Path(__file__).resolve().parents[1] / "core"))
 from fan_runtime import read_auto_fan_status
 from outdoor_monitor import OutdoorMonitor
 from power_flow import (
@@ -28,8 +30,8 @@ from power_flow import (
     build_chart, chart_buckets,
 )
 from system_state import (
-    COOLBOT_MAX_F, COOLBOT_MIN_F, DATABASE, MODES, mark_applied, read_state,
-    save_coolbot_targets, save_mode,
+    COOLBOT_MAX_F, COOLBOT_MIN_F, DATABASE, EV_MAX_A, EV_MIN_A, MODES, edit_ev_current,
+    ev_control_lock, mark_applied, read_state, save_coolbot_targets, save_mode,
 )
 from telemetry_store import (
     LEGACY_TELEMETRY, TELEMETRY_DB, numeric, read_dashboard, read_egauge_snapshots,
@@ -73,6 +75,8 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
         raise RuntimeError(
             "Set PORTAL_PASSWORD and a random PORTAL_SECRET_KEY of at least 32 characters in portal/.env"
         )
+    if not demo:
+        from Loads.openevse import set_charging
 
     app.config.update(
         SECRET_KEY=secret_key,
@@ -157,20 +161,23 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             return "Auto · Status unavailable"
         return "Auto · On" if on else "Auto · Off"
 
-    def controller_cards(message=None, error=None):
+    def controller_cards(message=None, error=None, *, manual_open=False, current_only=False):
         try:
             state = read_state(database)
         except (OSError, ValueError, sqlite3.Error):
             log.exception("[Portal] Unable to read controller settings")
             state = None
             error = "Controller settings are unavailable. Check system.db."
-        return render_template("controls.html", state=state, modes=MODES, demo=demo,
-                               fan_status=fan_auto_status() if state and state["fan"] == "auto" else None,
+        return render_template("ev_current.html" if current_only else "controls.html",
+                               state=state, modes=MODES, demo=demo, manual_open=manual_open,
+                               fan_status=fan_auto_status() if not current_only and state and state["fan"] == "auto" else None,
                                coolbot_min=COOLBOT_MIN_F, coolbot_max=COOLBOT_MAX_F,
-                               csrf=csrf_token(), message=message, error=error)
+                               ev_min=EV_MIN_A, ev_max=EV_MAX_A,
+                               csrf=csrf_token(), message=message, error=None if current_only else error,
+                               current_error=error if current_only else None)
 
-    def controls_response(message=None, error=None):
-        cards = controller_cards(message, error)
+    def controls_response(message=None, error=None, *, manual_open=False):
+        cards = controller_cards(message, error, manual_open=manual_open)
         if request.headers.get("HX-Request") == "true":
             return cards
         return render_template("index.html", controls=cards, monitoring=monitoring(),
@@ -202,6 +209,9 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
     @app.post("/mode/<target>")
     def set_mode(target):
         mode = request.form.get("mode")
+        if target == "charging_policy" and mode == "manual":
+            verify_csrf()
+            return controls_response(manual_open=True)
         if target not in MODES or mode not in MODES[target]:
             abort(400)
         verify_csrf()
@@ -236,6 +246,32 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             return controls_response(message=f"{label} saved as {display_mode}. It will be used when EMS is on.")
         log.info("[Portal] %s applied: %s", label, mode)
         return controls_response(message=f"{label} applied: {display_mode}.")
+
+    @app.post("/charging/current")
+    def set_ev_current():
+        verify_csrf()
+        error = None
+        try:
+            try:
+                amps = 0 if request.form.get("mode") == "pause" else int(request.form.get("amps", ""))
+            except ValueError:
+                raise ValueError(f"Choose 0 A to pause or {EV_MIN_A}–{EV_MAX_A} A to charge.") from None
+            with database.with_name(database.name + ".lock").open("a") as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with ev_control_lock(database), edit_ev_current(amps, database):
+                    if not demo:
+                        set_charging(amps > 0, amps)
+            log.info("[Portal] Manual EV charging requested %d A", amps)
+        except BlockingIOError:
+            error = "A mode change is in progress. Try again shortly."
+        except (requests.RequestException, OSError, sqlite3.Error):
+            log.exception("[Portal] Could not confirm manual EV current")
+            error = "Could not confirm the charging current. Check OpenEVSE and try again."
+        except ValueError as exc:
+            error = str(exc)
+        if request.headers.get("HX-Request") == "true":
+            return controller_cards(error=error, current_only=True)
+        return controls_response(error=error, manual_open=True)
 
     @app.get("/monitoring")
     def monitoring():

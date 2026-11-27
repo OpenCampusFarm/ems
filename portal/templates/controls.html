@@ -1,10 +1,13 @@
 {% macro mode_card(target, title, description=none) %}
+    {% set manual_selected = target == 'charging_policy' and state.ems == 'on' and (manual_open or state.ev_manual_amps is not none) %}
     <section class="panel control-panel" aria-labelledby="{{ target }}-title">
         <div class="panel-heading">
             <h3 id="{{ target }}-title">{{ title }}</h3>
             {% if target == 'fan' and fan_status %}
             <span class="badge" id="fan-auto-status" title="Fan relay state"
                   hx-get="{{ url_for('fan_auto_status') }}" hx-trigger="every 5s" hx-swap="innerHTML">{{ fan_status }}</span>
+            {% elif manual_selected %}
+            <span class="badge">Manual</span>
             {% else %}
             <span class="badge">Requested · {{ state[target] | title }}</span>
             {% endif %}
@@ -27,9 +30,13 @@
             <fieldset>
                 <legend class="sr-only">{{ title }} mode</legend>
                 <div class="segments">
+                    {% if target == 'charging_policy' %}
+                    <button name="mode" value="manual" type="submit"
+                            aria-pressed="{{ 'true' if manual_selected else 'false' }}"{% if state.ems == 'off' %} disabled{% endif %}>Manual</button>
+                    {% endif %}
                     {% for mode in modes[target] %}
                     <button name="mode" value="{{ mode }}" type="submit"
-                            aria-pressed="{{ 'true' if state[target] == mode else 'false' }}">{{ mode | title }}</button>
+                            aria-pressed="{{ 'true' if state[target] == mode and not manual_selected else 'false' }}">{{ mode | title }}</button>
                     {% endfor %}
                 </div>
                 {% if state[target ~ '_pending'] %}
@@ -38,6 +45,7 @@
             </fieldset>
             <p class="applying" role="status">Applying mode…</p>
         </form>
+        {% if manual_selected %}{% include 'ev_current.html' %}{% endif %}
     </section>
 {% endmacro %}
 

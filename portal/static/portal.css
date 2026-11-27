@@ -196,6 +196,16 @@ fieldset { min-width: 0; margin: 14px 0 0; border: none; padding: 0; }
 .segments button[aria-pressed="true"], .primary { background: var(--teal); color: var(--on-teal); }
 .segments button[aria-pressed="true"]:hover, .primary:hover { background: var(--teal-hover); }
 .retry { min-height: 44px; color: var(--teal); border: 0; background: transparent; text-decoration: underline; }
+.segments button:disabled { cursor: not-allowed; }
+.htmx-request .segments button:disabled { cursor: wait; }
+.ev-current-control { margin-top: 14px; border-top: 1px solid var(--border); }
+.ev-current-control .notice { margin-block: 12px 0; }
+.ev-current-control label, .ev-current-control output { font-weight: 650; }
+.ev-current-control output { font-variant-numeric: tabular-nums; }
+.ev-current-track { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: .875rem; }
+.ev-current-track span { white-space: nowrap; }
+.ev-current-track input { flex: 1; min-width: 0; height: 44px; margin: 0; accent-color: var(--teal); cursor: pointer; }
+.ev-current-control .retry { padding: 0; }
 .notice { margin-bottom: 12px; padding: 10px 13px; border: 1px solid var(--success-border); border-radius: 8px; color: var(--success-ink); background: var(--success-bg); }
 .notice.error { border-color: var(--error-border); color: var(--error-ink); background: var(--error-bg); }
 .applying { display: none; }

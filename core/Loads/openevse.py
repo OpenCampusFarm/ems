@@ -11,6 +11,8 @@ a person at the charger can always override the EMS.
   DELETE /claims/<client_id>   release the claim
 """
 
+from __future__ import annotations
+
 import logging
 from math import isfinite
 import os
