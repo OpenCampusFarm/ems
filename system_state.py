@@ -142,6 +142,8 @@ def save_coolbot_targets(clean_f, other_f, path=DATABASE):
     for value in (clean_f, other_f):
         if type(value) is not int or not COOLBOT_MIN_F <= value <= COOLBOT_MAX_F:
             raise ValueError(f"Enter temperatures from {COOLBOT_MIN_F} to {COOLBOT_MAX_F}°F in whole degrees.")
+    if clean_f > other_f:
+        raise ValueError("The clean-energy target must be at or below the Otherwise target.")
     with _edit_state(path) as db:
         result = db.execute(
             "UPDATE system SET coolbot_clean_f = ?, coolbot_other_f = ? WHERE id = 1",

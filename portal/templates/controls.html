@@ -57,7 +57,7 @@
     {{ mode_card('charging_policy', 'EV charging policy', 'Binary requests 12 A. Staged selects from 6, 20, 34, and 48 A. Both pause when estimated surplus solar is too low.') }}
     <section class="panel control-panel" aria-labelledby="coolbot-title">
         <h3 id="coolbot-title">CoolBot setpoints</h3>
-        <p class="muted" id="coolbot-rule">EMS uses the clean-energy target when solar reaches 500 W or grid carbon is below 1,400 lb CO₂/MWh.</p>
+        <p class="muted" id="coolbot-rule">EMS uses the clean-energy target when solar reaches 500 W or grid carbon is below 1,400 lb CO₂/MWh. Set it at or below the Otherwise target.</p>
         {% if state.ems == 'off' %}
         <p class="muted">Saved targets take effect when EMS automation is on.</p>
         {% endif %}
