@@ -27,7 +27,7 @@ from fan_runtime import read_auto_fan_status
 from outdoor_monitor import OutdoorMonitor
 from power_flow import (
     CARBON_VIEW, DEFAULT_PERIOD, EGAUGE_VIEW, FARM_TIME, GAP, OVERVIEW_VIEW, PERIODS, SOLARK_VIEWS, ChartView,
-    build_chart, chart_buckets,
+    build_chart, chart_buckets, max_history_period,
 )
 from system_state import (
     COOLBOT_MAX_F, COOLBOT_MIN_F, DATABASE, EV_MAX_A, EV_MIN_A, MODES, edit_ev_current,
@@ -35,7 +35,8 @@ from system_state import (
 )
 from telemetry_store import (
     LEGACY_TELEMETRY, TELEMETRY_DB, numeric, read_dashboard, read_egauge_snapshots,
-    read_equipment_carbon, read_solark_history, read_solark_workdata,
+    read_equipment_carbon, read_equipment_carbon_start, read_power_history_start,
+    read_solark_history, read_solark_history_start, read_solark_workdata,
 )
 
 log = logging.getLogger(__name__)
@@ -307,32 +308,40 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             selected_view = "power"
         solark_view = SOLARK_VIEWS.get(selected_view, SOLARK_VIEWS["power"])
         now = time.time()
+        chart_periods = {chart: PERIODS[key] for chart, key in ranges.items()}
+        legacy_path = None if demo else legacy
 
-        def window(key):
-            period = PERIODS[key]
+        def window(period):
             start = now - period.duration
             return start, chart_buckets(start, now, period.bucket)
 
         unavailable = False
         latest = {}
         meter_rows = {}
-        meter_ranges = [ranges["overview"], ranges["egauge"]]
+        meter_views = {"overview": OVERVIEW_VIEW, "egauge": EGAUGE_VIEW}
         if selected_view != "diagnostics":
-            meter_ranges.append(ranges["solark"])
-        for key in dict.fromkeys(meter_ranges):
-            start, buckets = window(key)
+            meter_views["solark"] = solark_view
+        for chart, view in meter_views.items():
+            period = chart_periods[chart]
             try:
-                sample, meter_rows[key] = read_dashboard(
-                    telemetry, None if demo else legacy, start, now, buckets
-                )
+                if ranges[chart] == "max":
+                    first = read_power_history_start(telemetry, legacy_path, now, view.series)
+                    period = chart_periods[chart] = max_history_period(first, now)
+                if period in meter_rows:
+                    continue
+                start, buckets = window(period)
+                sample, meter_rows[period] = read_dashboard(telemetry, legacy_path, start, now, buckets)
                 if not latest:
                     latest = sample
             except (OSError, sqlite3.Error):
                 log.exception("[Portal] Could not read telemetry")
-                meter_rows[key] = []
+                meter_rows[period] = []
                 unavailable = True
         try:
-            start, buckets = window(ranges["carbon"])
+            if ranges["carbon"] == "max":
+                first = read_equipment_carbon_start(telemetry, now)
+                chart_periods["carbon"] = max_history_period(first, now)
+            start, buckets = window(chart_periods["carbon"])
             carbon_rows = read_equipment_carbon(telemetry, start, now, buckets)
         except (OSError, sqlite3.Error):
             log.exception("[Portal] Could not read carbon estimates")
@@ -360,14 +369,17 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
         chosen = request.args.get("metric", "BatteryVolt(V)/183")
         if chosen not in measurable:
             chosen = next(iter(measurable), None)
-        solark_rows = meter_rows.get(ranges["solark"], [])
+        solark_rows = meter_rows.get(chart_periods["solark"], [])
         if selected_view == "diagnostics":
             solark_rows = []
             if chosen:
                 label, unit, _ = fields[chosen]
                 solark_view = ChartView(label, unit, 0.01, 3, {"reading": label}, include_zero=False)
                 try:
-                    start, buckets = window(ranges["solark"])
+                    if ranges["solark"] == "max":
+                        first = read_solark_history_start(telemetry, chosen, now)
+                        chart_periods["solark"] = max_history_period(first, now)
+                    start, buckets = window(chart_periods["solark"])
                     solark_rows = read_solark_history(telemetry, chosen, start, now, buckets)
                 except (OSError, sqlite3.Error, ValueError):
                     log.exception("[Portal] Could not read historical Sol-Ark diagnostics")
@@ -389,13 +401,12 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
         def range_url(endpoint, chart, key):
             return chart_url(endpoint, **{f"{chart}_range": key})
 
-        chart_periods = {chart: PERIODS[key] for chart, key in ranges.items()}
         html = render_template(
             "monitoring.html", latest=latest,
-            overview=build_chart(meter_rows[ranges["overview"]], now, chart_periods["overview"], OVERVIEW_VIEW),
+            overview=build_chart(meter_rows[chart_periods["overview"]], now, chart_periods["overview"], OVERVIEW_VIEW),
             overview_view=OVERVIEW_VIEW,
             solark=build_chart(solark_rows, now, chart_periods["solark"], solark_view), solark_view=solark_view,
-            egauge=build_chart(meter_rows[ranges["egauge"]], now, chart_periods["egauge"], EGAUGE_VIEW),
+            egauge=build_chart(meter_rows[chart_periods["egauge"]], now, chart_periods["egauge"], EGAUGE_VIEW),
             egauge_view=EGAUGE_VIEW, egauge_details=egauge_details,
             carbon=build_chart(carbon_rows, now, chart_periods["carbon"], CARBON_VIEW), carbon_view=CARBON_VIEW,
             carbon_totals=carbon_totals,

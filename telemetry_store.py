@@ -5,7 +5,7 @@ import logging
 import os
 import sqlite3
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from math import isfinite
 from pathlib import Path
 
@@ -237,9 +237,8 @@ def read_solark_history(path, metric, start, end, buckets):
         return [dict(row) for row in rows]
 
 
-def _dashboard_rows(db, start, end, buckets):
-    db.row_factory = sqlite3.Row
-    available = {column["name"] for column in db.execute("PRAGMA table_info(samples)")}
+def _power_chart_fields(db):
+    available = {column[1] for column in db.execute("PRAGMA table_info(samples)")}
     fields = {field: f"samples.{field}" for field in POWER_CHART_FIELDS if field in available}
     # Legacy grid readings were from eGauge, and legacy EV readings were from OpenEVSE.
     meter_fields = {
@@ -253,6 +252,12 @@ def _dashboard_rows(db, start, end, buckets):
         ),
     }
     fields.update(meter_fields)
+    return fields, meter_fields
+
+
+def _dashboard_rows(db, start, end, buckets):
+    db.row_factory = sqlite3.Row
+    fields, meter_fields = _power_chart_fields(db)
     meter_columns = ", ".join(f"{expr} AS {name}" for name, expr in meter_fields.items())
     latest = db.execute(
         f"SELECT *, {meter_columns} FROM samples WHERE ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT 1",
@@ -285,7 +290,8 @@ def _dashboard_rows(db, start, end, buckets):
     return dict(latest) if latest is not None else {}, [dict(row) for row in rows]
 
 
-def read_dashboard(path, legacy, start, end, buckets=()):
+@contextmanager
+def _dashboard_connection(path, legacy, end):
     # Readers never create or change the on-disk database.
     try:
         path.stat()
@@ -296,13 +302,66 @@ def read_dashboard(path, legacy, start, end, buckets=()):
         with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
             db.execute("BEGIN")
             if db.execute("PRAGMA user_version").fetchone()[0] != 0:
-                return _dashboard_rows(db, start, end, buckets)
+                yield db
+                return
 
     # The Pi may start the portal before the first successful EMS cycle.
     with closing(sqlite3.connect(":memory:")) as db:
         db.execute(SCHEMA)
         db.executemany(INSERT, _values(_legacy_samples(legacy), end - RETENTION_DAYS * DAY))
+        yield db
+
+
+def read_dashboard(path, legacy, start, end, buckets=()):
+    with _dashboard_connection(path, legacy, end) as db:
         return _dashboard_rows(db, start, end, buckets)
+
+
+def read_power_history_start(path, legacy, end, series):
+    """Find the first retained sample with data for any of the plotted series."""
+    with _dashboard_connection(path, legacy, end) as db:
+        fields, _ = _power_chart_fields(db)
+        present = " OR ".join(f"({fields[key]}) IS NOT NULL" for key in series if key in fields)
+        if not present:
+            return None
+        return db.execute(
+            f"SELECT MIN(ts) FROM samples WHERE ts >= ? AND ts <= ? AND ({present})",
+            (end - RETENTION_DAYS * DAY, end),
+        ).fetchone()[0]
+
+
+def read_solark_history_start(path, metric, end):
+    field = "$." + json.dumps(metric, ensure_ascii=False)
+    uri = path.resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
+        return db.execute(
+            """SELECT MIN(ts) FROM solark_workdata WHERE ts >= ? AND ts <= ?
+               AND json_type(readings, ?) IN ('integer', 'real')""",
+            (end - RETENTION_DAYS * DAY, end, field),
+        ).fetchone()[0]
+
+
+def _carbon_chart_fields(version):
+    if version >= 9:
+        return "equipment_carbon_samples", {"fan": "fan_avoided_lb", "ev": "ev_avoided_lb"}
+    return "carbon_samples", {"fan": "fan_avoided_lb", "ev": "NULL"}
+
+
+def read_equipment_carbon_start(path, end):
+    if not path.exists():
+        return None
+    uri = path.resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True, timeout=2)) as db:
+        db.execute("BEGIN")
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        if version < 8:
+            return None
+        source, fields = _carbon_chart_fields(version)
+        present = " OR ".join(f"{field} IS NOT NULL" for field in fields.values())
+        return db.execute(
+            f"SELECT MIN(ts) FROM {source} WHERE ts >= ? AND ts <= ? AND ({present})",
+            (end - RETENTION_DAYS * DAY, end),
+        ).fetchone()[0]
 
 
 def read_equipment_carbon(path, start, end, buckets=()):
@@ -316,8 +375,7 @@ def read_equipment_carbon(path, start, end, buckets=()):
         version = db.execute("PRAGMA user_version").fetchone()[0]
         if version < 8:
             return []
-        source = "equipment_carbon_samples" if version >= 9 else "carbon_samples"
-        fields = {"fan": "fan_avoided_lb", "ev": "ev_avoided_lb" if version >= 9 else "NULL"}
+        source, fields = _carbon_chart_fields(version)
         if buckets:
             spans = ", ".join("(?, ?)" for _ in buckets)
             boundaries = [value for bucket in buckets for value in bucket]

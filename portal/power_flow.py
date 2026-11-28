@@ -9,12 +9,14 @@ from telemetry_store import DAY, numeric
 
 FARM_TIME = ZoneInfo("America/Detroit")
 HOUR = 3600
+WEEK = 7 * DAY
+YEAR = 365 * DAY
 GAP = 12 * 60
 
 
 class Period(NamedTuple):
     label: str
-    duration: int
+    duration: float
     summary: str
     tick_format: str
     bucket: int = 0
@@ -69,9 +71,28 @@ PERIODS = {
     "week": Period("7 days", 7 * DAY, "Last 7 days · Hourly mean", "%m/%d", HOUR),
     "month": Period("30 days", 30 * DAY, "Last 30 days · Daily mean", "%m/%d", DAY),
     "quarter": Period("90 days", 90 * DAY, "Last 90 days · Daily mean", "%m/%d", DAY),
-    "year": Period("365 days", 365 * DAY, "Last 365 days · Weekly mean", "%b %Y", 7 * DAY),
+    "year": Period("1 year", YEAR, "Last 1 year · Weekly mean", "%b %Y", WEEK),
+    "3years": Period("3 years", 3 * YEAR, "Last 3 years · Weekly mean", "%b %Y", WEEK),
+    "5years": Period("5 years", 5 * YEAR, "Last 5 years · Weekly mean", "%b %Y", WEEK),
+    "max": Period("Max", DAY, "All recorded data", "%H:%M"),
 }
 DEFAULT_PERIOD = "day"
+
+
+def max_history_period(first_sample, end):
+    if first_sample is None:
+        return PERIODS["max"]
+    duration = max(60, end - first_sample)
+    for limit, bucket, summary, tick_format in (
+        (15 * 60, 0, "Recorded samples", "%H:%M:%S"),
+        (DAY, 0, "Recorded samples", "%H:%M"),
+        (WEEK, HOUR, "Hourly mean", "%m/%d %H:%M"),
+        (90 * DAY, DAY, "Daily mean", "%m/%d"),
+        (5 * YEAR, WEEK, "Weekly mean", "%b %Y"),
+        (float("inf"), 2 * WEEK, "Two-week mean", "%b %Y"),
+    ):
+        if duration <= limit:
+            return Period("Max", duration, f"All recorded data · {summary}", tick_format, bucket)
 
 
 def chart_buckets(start, end, size):
@@ -86,7 +107,7 @@ def chart_buckets(start, end, size):
         return spans
 
     day = datetime.fromtimestamp(start, FARM_TIME).date()
-    if size == 7 * DAY:
+    if size % WEEK == 0:
         day -= timedelta(days=day.weekday())
     step = timedelta(days=size // DAY)
     boundary = datetime.combine(day, time.min, FARM_TIME).timestamp()
