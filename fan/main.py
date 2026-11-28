@@ -44,7 +44,7 @@ class FanMode(enum.Enum):
 RELAY_PIN = 23
 POLL_INTERVAL = 30  # seconds between checks
 START_BELOW_SETPOINT_F = 1.0
-STOP_BELOW_SETPOINT_F = 1.5
+ROOM_HYSTERESIS_F = 0.5
 START_OUTDOOR_DIFFERENCE_F = 3.0
 STOP_OUTDOOR_DIFFERENCE_F = 1.0
 
@@ -107,37 +107,23 @@ async def control_loop(mode: FanMode):
                     )
                     fan_on = False
                     set_fan(False)
-                elif not fan_on and (
-                    room >= setpoint - START_BELOW_SETPOINT_F
-                    and room - outdoor >= START_OUTDOOR_DIFFERENCE_F
-                ):
-                    fan_on = True
-                    log.info(
-                        "[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F — fan ON",
-                        outdoor,
-                        setpoint,
-                        room,
-                    )
-                    set_fan(True)
-                elif fan_on and (
-                    room <= setpoint - STOP_BELOW_SETPOINT_F
-                    or room - outdoor <= STOP_OUTDOOR_DIFFERENCE_F
-                ):
-                    fan_on = False
-                    log.info(
-                        "[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F — fan OFF",
-                        outdoor,
-                        setpoint,
-                        room,
-                    )
-                    set_fan(False)
                 else:
+                    state = read_state()
+                    start_f = setpoint - START_BELOW_SETPOINT_F
+                    if state["ems"] == "on" and setpoint == state["coolbot_other_f"]:
+                        start_f = min(start_f, state["coolbot_clean_f"])
+                    stop_f = start_f - ROOM_HYSTERESIS_F
+                    cooler_by = room - outdoor
+                    if fan_on:
+                        next_on = not (room <= stop_f or cooler_by <= STOP_OUTDOOR_DIFFERENCE_F)
+                    else:
+                        next_on = room >= start_f and cooler_by >= START_OUTDOOR_DIFFERENCE_F
+                    if next_on != fan_on:
+                        fan_on = next_on
+                        set_fan(fan_on)
                     log.info(
-                        "[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F — fan %s (no change)",
-                        outdoor,
-                        setpoint,
-                        room,
-                        "ON" if fan_on else "OFF",
+                        "[Fan] outdoor=%.1f°F, setpoint=%.1f°F, room=%.1f°F, start=%.1f°F, stop=%.1f°F — fan %s",
+                        outdoor, setpoint, room, start_f, stop_f, "ON" if fan_on else "OFF",
                     )
 
         except Exception as e:

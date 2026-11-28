@@ -15,8 +15,11 @@
         {% if target == 'fan' %}
         <p class="muted"><strong>Auto mode only</strong></p>
         <p class="muted">The fan tries outdoor cooling first. CoolBot cools as needed.</p>
-        <p class="muted"><strong>Starts</strong> when the room warms to 1°F below the CoolBot setting and it’s at least 3°F cooler outside.</p>
-        <p class="muted"><strong>Stops</strong> when the room cools to 1.5°F below the setting or the outdoor air is no more than 1°F cooler.</p>
+        <p class="muted"><strong>Starts</strong> 1°F below the CoolBot setting when it’s at least 3°F cooler outside.</p>
+        {% if state.ems == 'on' %}
+        <p class="muted">When CoolBot uses the <strong>Otherwise</strong> setting, the fan can start sooner at the Clean energy target ({{ state.coolbot_clean_f }}°F).</p>
+        {% endif %}
+        <p class="muted"><strong>Stops</strong> when the room is 0.5°F below the start temperature or the outdoor air is no more than 1°F cooler.</p>
         {% else %}
         <p class="muted">{{ description }}</p>
         {% endif %}
