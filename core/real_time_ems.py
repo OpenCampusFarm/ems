@@ -162,11 +162,7 @@ def get_egauge_data() -> dict | None:
 
 # ── EMS decision ─────────────────────────────────────────────────────────────
 
-_last_requested_setpoint: int | None = None
-
-
-def apply_coolbot_target(energy_clean: bool) -> None:
-    global _last_requested_setpoint
+def apply_coolbot_target(energy_clean: bool, reported_setpoint: float | None) -> None:
     try:
         state = read_state()
     except (OSError, ValueError, sqlite3.Error):
@@ -175,8 +171,10 @@ def apply_coolbot_target(energy_clean: bool) -> None:
     if _stop.is_set() or state["ems"] == "off":
         return
     target = state["coolbot_clean_f"] if energy_clean else state["coolbot_other_f"]
-    if target != _last_requested_setpoint and change_setpoint(target):
-        _last_requested_setpoint = target
+    # Sending a command does not confirm that CoolBot applied it. Retry once
+    # per EMS cycle until the setpoint reported by CoolBot matches the target.
+    if target != reported_setpoint:
+        change_setpoint(target)
 
 
 def run_ems_cycle(policy: str) -> None:
@@ -218,8 +216,9 @@ def run_ems_cycle(policy: str) -> None:
             ev_data["power_w"],
         )
 
+    reported_setpoint = get_coolbot_temp()
     publish(power, egauge, ev_data, room_temp, moer, policy,
-            coolbot_setpoint_f=get_coolbot_temp())
+            coolbot_setpoint_f=reported_setpoint)
 
     pv_producing = numeric(pv_w) and pv_w >= PV_MIN_WATTS
     grid_clean = moer is not None and moer < CO2_CLEAN_THRESHOLD
@@ -238,7 +237,7 @@ def run_ems_cycle(policy: str) -> None:
     if _stop.is_set():
         return
 
-    apply_coolbot_target(energy_clean)
+    apply_coolbot_target(energy_clean, reported_setpoint)
 
     if _stop.is_set():
         return

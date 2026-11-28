@@ -213,7 +213,8 @@ class CoolBotClient:
 
 _client: CoolBotClient | None = None
 _loop:   asyncio.AbstractEventLoop | None = None
-_thread: threading.Thread | None = None
+_connection_lock = threading.Lock()
+CONNECT_TIMEOUT = 15
 
 
 def _run_loop(loop: asyncio.AbstractEventLoop) -> None:
@@ -221,23 +222,35 @@ def _run_loop(loop: asyncio.AbstractEventLoop) -> None:
     loop.run_forever()
 
 
-def _ensure_client() -> CoolBotClient:
-    global _client, _loop, _thread
-
+async def _connect_client() -> CoolBotClient:
+    global _client
     if _client is not None:
-        return _client
+        await _client.__aexit__()
+        _client = None
+    client = CoolBotClient()
+    try:
+        await asyncio.wait_for(client.__aenter__(), timeout=CONNECT_TIMEOUT)
+    except (asyncio.CancelledError, Exception):
+        await client.__aexit__()
+        raise
+    _client = client
+    return client
 
-    _loop = asyncio.new_event_loop()
-    _thread = threading.Thread(target=_run_loop, args=(_loop,), daemon=True)
-    _thread.start()
 
-    async def _connect():
-        global _client
-        _client = CoolBotClient()
-        await _client.__aenter__()
-
-    asyncio.run_coroutine_threadsafe(_connect(), _loop).result(timeout=15)
-    return _client
+def _ensure_client() -> CoolBotClient:
+    global _loop
+    with _connection_lock:
+        if _client is not None and _client._listen_task is not None and not _client._listen_task.done():
+            return _client
+        if _loop is None:
+            _loop = asyncio.new_event_loop()
+            threading.Thread(target=_run_loop, args=(_loop,), daemon=True).start()
+        connection = asyncio.run_coroutine_threadsafe(_connect_client(), _loop)
+        try:
+            return connection.result(timeout=CONNECT_TIMEOUT + 2)
+        except TimeoutError:
+            connection.cancel()
+            raise
 
 
 def change_setpoint(temperature: int) -> bool:
