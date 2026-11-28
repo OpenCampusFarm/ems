@@ -61,7 +61,9 @@ CARBON_VIEW = ChartView("Estimated CO₂ avoided", "kg/h", 0.25, 3, {
 
 
 PERIODS = {
+    "15min": Period("15 min", 15 * 60, "Last 15 min · Recorded samples", "%H:%M"),
     "minutes": Period("Minutes", HOUR, "Last 60 min · Recorded samples", "%H:%M"),
+    "3hours": Period("3 hours", 3 * HOUR, "Last 3 hours · Recorded samples", "%H:%M"),
     "hours": Period("Hours", 12 * HOUR, "Last 12 hours · Hourly mean", "%H:%M", HOUR),
     "day": Period("Day", DAY, "Last 24 hours · Recorded samples", "%H:%M"),
     "week": Period("Week", 7 * DAY, "Last 7 days · Hourly mean", "%m/%d", HOUR),
