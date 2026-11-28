@@ -182,8 +182,7 @@ def run_ems_cycle(policy: str) -> None:
 
     moer = get_grid_moer()
     room_temp = _retry(get_room_temp, retries=2, label="CoolBot room temp")
-    # Local-network device: no retries, the next cycle tries again.
-    ev_data = get_ev_status()
+    ev_data = _retry(get_ev_status, retries=2, label="OpenEVSE status")
     egauge = _retry(get_egauge_data, retries=1, label="eGauge")
 
     pv_w = power.get("pv")
@@ -242,13 +241,9 @@ def run_ems_cycle(policy: str) -> None:
     if _stop.is_set():
         return
 
-    if ev_data is None:
-        log.info("[EV] OpenEVSE unavailable — skipping charging decision")
-        return
-
     surplus_w = (
         excess_pv_watts(pv_w, load_w, ev_data["power_w"])
-        if numeric(pv_w) and numeric(load_w) else 0.0
+        if ev_data is not None and numeric(pv_w) and numeric(load_w) else 0.0
     )
     try:
         with ev_control_lock():
@@ -256,6 +251,9 @@ def run_ems_cycle(policy: str) -> None:
             if _stop.is_set() or state["ems"] == "off":
                 return
             manual = state["ev_manual_amps"]
+            if ev_data is None and manual is None:
+                log.info("[EV] OpenEVSE status unavailable — skipping automatic charging decision")
+                return
             amps = choose_ev_amps(surplus_w, policy) if manual is None else manual
             set_charging(amps > 0, amps)
         log.info("[EV] %s requested %d A (estimated surplus solar %.0f W)",

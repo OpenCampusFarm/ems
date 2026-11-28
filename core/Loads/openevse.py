@@ -17,6 +17,7 @@ import logging
 from math import isfinite
 import os
 from pathlib import Path
+import time
 
 import requests
 from dotenv import load_dotenv
@@ -33,8 +34,12 @@ OPENEVSE_PASSWORD = os.environ.get("OPENEVSE_PASSWORD")
 # Numeric client id for our claim (the firmware parses it with toInt(); 0 is
 # what a non-numeric id like "client" resolves to, so use a non-zero number).
 OPENEVSE_CLAIM_ID = int(os.environ.get("OPENEVSE_CLAIM_ID", "20"))
+CLAIM_PATH = f"/claims/{OPENEVSE_CLAIM_ID}"
 
 TIMEOUT = 10  # seconds
+CLAIM_TIMEOUT = 3  # seconds per HTTP request
+CLAIM_ATTEMPTS = 3
+CLAIM_RETRY_DELAY = 1  # second
 
 # /status "state" codes
 STATE_NOT_CONNECTED = 1
@@ -53,17 +58,21 @@ def _request(method: str, path: str, *, timeout=TIMEOUT, **kwargs) -> requests.R
     return resp
 
 
+def _read_claim() -> dict | None:
+    try:
+        claim = _request("GET", CLAIM_PATH, timeout=CLAIM_TIMEOUT).json()
+    except requests.HTTPError as error:
+        if error.response is not None and error.response.status_code == 404:
+            return None
+        raise
+    return claim if isinstance(claim, dict) else None
+
+
 def get_requested_current() -> int | None:
     """Read the EMS claim or the charger's pilot current when no rate is claimed."""
     try:
-        try:
-            claim = _request("GET", f"/claims/{OPENEVSE_CLAIM_ID}", timeout=3).json()
-        except requests.HTTPError as error:
-            if error.response is None or error.response.status_code != 404:
-                raise
-            claim = None
-
-        if isinstance(claim, dict):
+        claim = _read_claim()
+        if claim is not None:
             if claim.get("state") == "disabled":
                 return 0
             amps = claim.get("charge_current")
@@ -111,9 +120,29 @@ def get_status() -> dict | None:
 
 
 def set_charging(enabled: bool, amps: int | None = None) -> dict:
-    """Allow charging at the requested current, or block it via an EVSE claim."""
+    """Set and confirm the EMS claim, retrying if the charger hasn't stored it."""
     body = claim_body(enabled, amps)
-    return _request("POST", f"/claims/{OPENEVSE_CLAIM_ID}", json=body).json()
+    for attempt in range(1, CLAIM_ATTEMPTS + 1):
+        post_error = None
+        try:
+            _request("POST", CLAIM_PATH, timeout=CLAIM_TIMEOUT, json=body)
+        except requests.RequestException as error:
+            post_error = error
+
+        # Read the EMS claim even if the HTTP acknowledgment was lost. The
+        # pilot can differ when a higher-priority charger limit is in effect.
+        try:
+            claim = _read_claim()
+            if claim is not None and all(claim.get(key) == value for key, value in body.items()):
+                return claim
+            last_error = post_error or requests.RequestException("OpenEVSE claim readback did not match")
+        except requests.RequestException as error:
+            last_error = post_error or error
+
+        if attempt < CLAIM_ATTEMPTS:
+            log.warning("[EV] Claim not confirmed (attempt %d/%d): %s", attempt, CLAIM_ATTEMPTS, last_error)
+            time.sleep(CLAIM_RETRY_DELAY)
+    raise last_error
 
 
 def resume_charging(amps: int) -> None:
@@ -142,4 +171,4 @@ def resume_charging(amps: int) -> None:
 
 def release_claim() -> None:
     """Drop our claim so the charger falls back to its own control logic."""
-    _request("DELETE", f"/claims/{OPENEVSE_CLAIM_ID}")
+    _request("DELETE", CLAIM_PATH)
