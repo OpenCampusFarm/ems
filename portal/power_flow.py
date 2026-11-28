@@ -62,14 +62,14 @@ CARBON_VIEW = ChartView("Estimated CO₂ avoided", "kg/h", 0.25, 3, {
 
 PERIODS = {
     "15min": Period("15 min", 15 * 60, "Last 15 min · Recorded samples", "%H:%M"),
-    "minutes": Period("Minutes", HOUR, "Last 60 min · Recorded samples", "%H:%M"),
+    "minutes": Period("1 hour", HOUR, "Last 1 hour · Recorded samples", "%H:%M"),
     "3hours": Period("3 hours", 3 * HOUR, "Last 3 hours · Recorded samples", "%H:%M"),
-    "hours": Period("Hours", 12 * HOUR, "Last 12 hours · Hourly mean", "%H:%M", HOUR),
-    "day": Period("Day", DAY, "Last 24 hours · Recorded samples", "%H:%M"),
-    "week": Period("Week", 7 * DAY, "Last 7 days · Hourly mean", "%m/%d", HOUR),
-    "month": Period("Month", 30 * DAY, "Last 30 days · Daily mean", "%m/%d", DAY),
-    "quarter": Period("3 months", 90 * DAY, "Last 90 days · Daily mean", "%m/%d", DAY),
-    "year": Period("Year", 365 * DAY, "Last 365 days · Weekly mean", "%b %Y", 7 * DAY),
+    "hours": Period("12 hours", 12 * HOUR, "Last 12 hours · Hourly mean", "%H:%M", HOUR),
+    "day": Period("24 hours", DAY, "Last 24 hours · Recorded samples", "%H:%M"),
+    "week": Period("7 days", 7 * DAY, "Last 7 days · Hourly mean", "%m/%d", HOUR),
+    "month": Period("30 days", 30 * DAY, "Last 30 days · Daily mean", "%m/%d", DAY),
+    "quarter": Period("90 days", 90 * DAY, "Last 90 days · Daily mean", "%m/%d", DAY),
+    "year": Period("365 days", 365 * DAY, "Last 365 days · Weekly mean", "%b %Y", 7 * DAY),
 }
 DEFAULT_PERIOD = "day"
 
