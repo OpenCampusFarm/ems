@@ -19,6 +19,10 @@
     </div>
 </div>
 {% endmacro %}
+{% macro csv_download(chart, label, view=none, metric=none) %}
+<a class="csv-download" href="{{ url_for('download_csv', chart=chart, range=ranges[chart], view=view, metric=metric) }}"
+   aria-label="Download CSV for {{ label }}" download>Download CSV</a>
+{% endmacro %}
 {% macro range_picker(chart, label) %}
 <nav class="periods" aria-label="{{ label }} time range">
     {% for key, option in periods.items() %}
@@ -101,6 +105,7 @@
             {% endfor %}
         </div>
         {{ chart_panel(overview, overview_view, 'overview', 'power-chart-viewport', 'Negative Sol-Ark grid power = export.') }}
+        {{ csv_download('overview', 'Farm overview') }}
     </section>
     <section class="monitoring-group" aria-labelledby="solark-heading">
         <h2 id="solark-heading">Sol-Ark</h2>
@@ -160,6 +165,7 @@
             <p class="muted">Waiting for Sol-Ark diagnostics.</p>
             {% endif %}
         </details>
+        {{ csv_download('solark', 'Sol-Ark', selected_view, selected_metric if selected_view == 'diagnostics' else none) }}
     </section>
     <section class="monitoring-group" aria-labelledby="egauge-heading">
         <h2 id="egauge-heading">eGauge</h2>
@@ -188,6 +194,7 @@
                 <p class="muted">Waiting for eGauge readings.</p>
             {% endif %}
         </details>
+        {{ csv_download('egauge', 'eGauge') }}
     </section>
     <section class="panel chart carbon-chart">
         <div class="panel-heading"><h2>Estimated CO₂ avoided</h2><span class="muted">kg/h · {{ chart_periods.carbon.summary }} · ET</span></div>
@@ -215,5 +222,6 @@
         <p class="carbon-caption muted"><strong>One-hour examples</strong> use a WattTime rate of 1,400 lb CO₂/MWh.</p>
         <p class="carbon-caption muted"><strong>Auto ventilation</strong> saves about <strong>0.16 kg CO₂</strong> in one hour versus AC providing the same cooling, when the farm is buying grid power and the outdoor air is 8°F cooler than the room.</p>
         <p class="carbon-caption muted"><strong>Staged charging</strong> at 6 A (1.44 kW) on surplus solar saves about <strong>0.91 kg CO₂</strong> in one hour compared with drawing the same energy from the grid.</p>
+        {{ csv_download('carbon', 'Estimated CO₂ avoided') }}
     </section>
 </div>

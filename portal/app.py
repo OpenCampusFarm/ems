@@ -1,5 +1,7 @@
+import csv
 import fcntl
 import hmac
+import io
 import json
 import logging
 import os
@@ -16,7 +18,7 @@ from xmlrpc.client import Error as RPCError
 
 import requests
 from dotenv import load_dotenv
-from flask import Flask, abort, redirect, render_template, request, session, url_for
+from flask import Flask, Response, abort, redirect, render_template, request, session, url_for
 
 from coolbot_monitor import STALE_SECONDS, CoolBotMonitor
 from process_control import apply_mode, service_info, service_status
@@ -47,6 +49,46 @@ def diagnostic_field(key):
     name, _, register = key.rpartition("/")
     label, _, unit = name[:-1].rpartition("(") if name.endswith(")") else (name, "", "")
     return label, unit, register
+
+
+def diagnostics_selection(diagnostics):
+    measurable = [key for key, value in diagnostics.items() if numeric(value)]
+    chosen = request.args.get("metric", "BatteryVolt(V)/183")
+    if chosen not in measurable:
+        chosen = next(iter(measurable), None)
+    return measurable, chosen
+
+
+def diagnostics_view(metric):
+    label, unit, _ = diagnostic_field(metric) if metric else ("Inverter diagnostics", "", "")
+    return ChartView(label, unit, 0.01, 3, {"reading": label}, include_zero=False)
+
+
+def chart_csv(rows, period, view):
+    columns = [(key, f"{label} ({view.unit})" if view.unit else label) for key, label in view.series.items()]
+    if "reading" in view.series:
+        columns[0] = ("reading", f"Sol-Ark reading: {columns[0][1]}")
+    if view is CARBON_VIEW:
+        columns.extend((f"{key}_kg", f"{label} (kg)") for key, label in view.series.items())
+
+    def timestamp(value):
+        return datetime.fromtimestamp(value, FARM_TIME).isoformat(timespec="seconds")
+
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    time_columns = ["timestamp_et"]
+    if period.bucket:
+        time_columns.extend(("interval_start_et", "interval_end_et"))
+    writer.writerow([*time_columns, *(label for _, label in columns)])
+    for row in rows:
+        values = [row.get(key) for key, _ in columns]
+        if not any(numeric(value) for value in values):
+            continue
+        times = [timestamp(row["ts"])]
+        if period.bucket:
+            times.extend((timestamp(row["bucket_start"]), timestamp(row["bucket_end"])))
+        writer.writerow([*times, *(value if numeric(value) else "" for value in values)])
+    return output.getvalue()
 
 
 def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
@@ -294,6 +336,72 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
             return controller_cards(error=error, current_only=True)
         return controls_response(error=error, manual_open=True)
 
+    def read_chart(range_key, view, now, *, metric=None, meter_cache=None):
+        legacy_path = None if demo else legacy
+        period = PERIODS[range_key]
+        if range_key == "max":
+            if view is CARBON_VIEW:
+                first = read_equipment_carbon_start(telemetry, now)
+            elif metric:
+                first = read_solark_history_start(telemetry, metric, now)
+            else:
+                first = read_power_history_start(telemetry, legacy_path, now, view.series)
+            period = max_history_period(first, now)
+        start = now - period.duration
+        buckets = chart_buckets(start, now, period.bucket)
+        if view is CARBON_VIEW:
+            return period, read_equipment_carbon(telemetry, start, now, buckets), {}
+        if metric:
+            return period, read_solark_history(telemetry, metric, start, now, buckets), {}
+        if meter_cache is None:
+            meter_cache = {}
+        if period not in meter_cache:
+            meter_cache[period] = read_dashboard(telemetry, legacy_path, start, now, buckets)
+        latest, rows = meter_cache[period]
+        return period, rows, latest
+
+    def selected_solark_view():
+        view = request.args.get("view", "power")
+        return view if view in (*SOLARK_VIEWS, "diagnostics") else "power"
+
+    @app.get("/monitoring/<chart>.csv")
+    def download_csv(chart):
+        range_key = request.args.get("range", DEFAULT_PERIOD)
+        if range_key not in PERIODS:
+            abort(400, "Unknown chart time range.")
+        now = time.time()
+        view_key = selected_solark_view() if chart == "solark" else None
+        metric = None
+        try:
+            if view_key is not None:
+                name = f"solark-{view_key}"
+                if view_key == "diagnostics":
+                    _, diagnostics = read_solark_workdata(telemetry, now)
+                    _, metric = diagnostics_selection(diagnostics)
+                    view = diagnostics_view(metric)
+                else:
+                    view = SOLARK_VIEWS[view_key]
+            else:
+                exports = {
+                    "overview": ("farm-overview", OVERVIEW_VIEW),
+                    "egauge": ("egauge", EGAUGE_VIEW),
+                    "carbon": ("estimated-co2-avoided", CARBON_VIEW),
+                }
+                if chart not in exports:
+                    abort(404)
+                name, view = exports[chart]
+            if view_key == "diagnostics" and metric is None:
+                period, rows = PERIODS[range_key], []
+            else:
+                period, rows, _ = read_chart(range_key, view, now, metric=metric)
+        except (OSError, sqlite3.Error, ValueError):
+            log.exception("[Portal] Could not export %s chart", chart)
+            abort(503, "Telemetry is temporarily unavailable.")
+
+        duration = period.label.lower().replace(" ", "-")
+        return Response(chart_csv(rows, period, view), content_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{name}-{duration}.csv"'})
+
     @app.get("/monitoring")
     def monitoring():
         shared_range = request.args.get("range", DEFAULT_PERIOD)
@@ -303,46 +411,30 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
         for chart in ("overview", "solark", "egauge", "carbon"):
             selected = request.args.get(f"{chart}_range", shared_range)
             ranges[chart] = selected if selected in PERIODS else shared_range
-        selected_view = request.args.get("view", "power")
-        if selected_view not in (*SOLARK_VIEWS, "diagnostics"):
-            selected_view = "power"
+        selected_view = selected_solark_view()
         solark_view = SOLARK_VIEWS.get(selected_view, SOLARK_VIEWS["power"])
         now = time.time()
         chart_periods = {chart: PERIODS[key] for chart, key in ranges.items()}
-        legacy_path = None if demo else legacy
-
-        def window(period):
-            start = now - period.duration
-            return start, chart_buckets(start, now, period.bucket)
-
         unavailable = False
         latest = {}
         meter_rows = {}
+        meter_cache = {}
         meter_views = {"overview": OVERVIEW_VIEW, "egauge": EGAUGE_VIEW}
         if selected_view != "diagnostics":
             meter_views["solark"] = solark_view
         for chart, view in meter_views.items():
-            period = chart_periods[chart]
             try:
-                if ranges[chart] == "max":
-                    first = read_power_history_start(telemetry, legacy_path, now, view.series)
-                    period = chart_periods[chart] = max_history_period(first, now)
-                if period in meter_rows:
-                    continue
-                start, buckets = window(period)
-                sample, meter_rows[period] = read_dashboard(telemetry, legacy_path, start, now, buckets)
+                chart_periods[chart], meter_rows[chart], sample = read_chart(
+                    ranges[chart], view, now, meter_cache=meter_cache,
+                )
                 if not latest:
                     latest = sample
             except (OSError, sqlite3.Error):
                 log.exception("[Portal] Could not read telemetry")
-                meter_rows[period] = []
+                meter_rows[chart] = []
                 unavailable = True
         try:
-            if ranges["carbon"] == "max":
-                first = read_equipment_carbon_start(telemetry, now)
-                chart_periods["carbon"] = max_history_period(first, now)
-            start, buckets = window(chart_periods["carbon"])
-            carbon_rows = read_equipment_carbon(telemetry, start, now, buckets)
+            chart_periods["carbon"], carbon_rows, _ = read_chart(ranges["carbon"], CARBON_VIEW, now)
         except (OSError, sqlite3.Error):
             log.exception("[Portal] Could not read carbon estimates")
             carbon_rows = []
@@ -365,26 +457,17 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
         except (OSError, sqlite3.Error, ValueError):
             log.exception("[Portal] Could not read eGauge details")
         fields = {key: diagnostic_field(key) for key in diagnostics}
-        measurable = [key for key, value in diagnostics.items() if numeric(value)]
-        chosen = request.args.get("metric", "BatteryVolt(V)/183")
-        if chosen not in measurable:
-            chosen = next(iter(measurable), None)
-        solark_rows = meter_rows.get(chart_periods["solark"], [])
+        measurable, chosen = diagnostics_selection(diagnostics)
+        solark_rows = meter_rows.get("solark", [])
         if selected_view == "diagnostics":
-            solark_rows = []
+            solark_view = diagnostics_view(chosen)
             if chosen:
-                label, unit, _ = fields[chosen]
-                solark_view = ChartView(label, unit, 0.01, 3, {"reading": label}, include_zero=False)
                 try:
-                    if ranges["solark"] == "max":
-                        first = read_solark_history_start(telemetry, chosen, now)
-                        chart_periods["solark"] = max_history_period(first, now)
-                    start, buckets = window(chart_periods["solark"])
-                    solark_rows = read_solark_history(telemetry, chosen, start, now, buckets)
+                    chart_periods["solark"], solark_rows, _ = read_chart(
+                        ranges["solark"], solark_view, now, metric=chosen,
+                    )
                 except (OSError, sqlite3.Error, ValueError):
                     log.exception("[Portal] Could not read historical Sol-Ark diagnostics")
-            else:
-                solark_view = ChartView("Inverter diagnostics", "", 1, 0, {})
         status = json.loads(latest.get("solark_status") or "{}")
         coolbot = read_coolbot() if read_coolbot else None
         coolbot_last_read = (
@@ -403,10 +486,10 @@ def create_app(database=DATABASE, telemetry=TELEMETRY_DB, demo=False, *,
 
         html = render_template(
             "monitoring.html", latest=latest,
-            overview=build_chart(meter_rows[chart_periods["overview"]], now, chart_periods["overview"], OVERVIEW_VIEW),
+            overview=build_chart(meter_rows["overview"], now, chart_periods["overview"], OVERVIEW_VIEW),
             overview_view=OVERVIEW_VIEW,
             solark=build_chart(solark_rows, now, chart_periods["solark"], solark_view), solark_view=solark_view,
-            egauge=build_chart(meter_rows[chart_periods["egauge"]], now, chart_periods["egauge"], EGAUGE_VIEW),
+            egauge=build_chart(meter_rows["egauge"], now, chart_periods["egauge"], EGAUGE_VIEW),
             egauge_view=EGAUGE_VIEW, egauge_details=egauge_details,
             carbon=build_chart(carbon_rows, now, chart_periods["carbon"], CARBON_VIEW), carbon_view=CARBON_VIEW,
             carbon_totals=carbon_totals,

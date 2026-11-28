@@ -164,6 +164,8 @@ h3 { font-size: 1.08rem; }
 .plot text { fill: var(--muted); font-family: inherit; font-size: 12px; }
 .times { grid-column: 2; display: flex; justify-content: space-between; color: var(--muted); font-size: .825rem; font-variant-numeric: tabular-nums; }
 .chart-footer { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px; }
+.csv-download { display: inline-flex; align-items: center; min-height: 44px; margin-top: 12px; padding: 0 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--ink); font-size: .875rem; font-weight: 650; text-decoration: none; }
+.csv-download:hover { background: var(--surface-hover); }
 .legend { display: flex; flex-wrap: wrap; gap: 6px 15px; padding: 0; margin: 0; list-style: none; font-size: .875rem; }
 .legend li::before { content: ""; display: inline-block; width: 16px; border-top: 3px solid var(--accent); margin-inline-end: 6px; vertical-align: middle; }
 .legend li.egauge_grid_w::before, .legend li.solark_grid_w::before, .legend li.grid_l1_w::before, .legend li.fan_avoided::before { border-top-style: dashed; }
