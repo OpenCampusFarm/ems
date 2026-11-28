@@ -2,6 +2,10 @@
 
 Energy Management System with `core`, `fan`, and the [operator portal](portal/README.md). Use the portal setup to configure the operator account and its Python environment.
 
+## Farm Energy Portal
+
+![Farm Energy Portal showing live readings, power and carbon charts, and equipment controls](docs/farm-energy-portal.png)
+
 ## Project Structure
 
 ```
